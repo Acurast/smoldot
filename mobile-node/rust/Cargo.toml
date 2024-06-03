@@ -1,0 +1,21 @@
+[package]
+name = "smoldot-light-mobile"
+version = "2.0.28"
+description = "Mobile bindings to a light client for Substrate-based blockchains"
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+repository.workspace = true
+include.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib", "staticlib"]
+
+[dependencies]
+async-lock = { version = "3.0.0" }
+futures-lite = { version = "2.3.0" }
+futures-util = { version = "0.3.27" }
+log = { version = "0.4.21", default-features = false }
+slab = { version = "0.4.8" }
+smoldot-light = { version = "0.16.0", path = "../../light-base", default-features = false, features = ["std"] }

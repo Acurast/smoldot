@@ -2405,6 +2405,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "smoldot-light-mobile"
+version = "2.0.28"
+dependencies = [
+ "async-lock",
+ "futures-lite",
+ "futures-util",
+ "log",
+ "slab",
+ "smoldot-light",
+]
+
+[[package]]
 name = "smoldot-light-wasm"
 version = "2.0.28"
 dependencies = [

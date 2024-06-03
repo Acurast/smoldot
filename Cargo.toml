@@ -5,6 +5,7 @@ members = [
     "lib",
     "full-node",
     "light-base",
+    "mobile-node/rust",
     "wasm-node/rust",
 ]
 
