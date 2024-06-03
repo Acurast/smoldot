@@ -81,20 +81,23 @@ dependencies {
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
 }
 
-val buildSmoldotFFI: TaskProvider<Copy> = tasks.register("buildSmoldotFFI", Copy::class.java) {
+val buildSmoldotFFI: TaskProvider<Task> = tasks.register("buildSmoldotFFI", Task::class.java) {
     dependsOn("cargoBuild")
-    val targets = listOf(
-        "aarch64-linux-android" to "arm64-v8a",
-        "armv7-linux-androideabi" to "armeabi-v7a",
-        "i686-linux-android" to "x86",
-        "x86_64-linux-android" to "x86_64",
-    )
 
-    targets.forEach { (source, destination) ->
-        copy {
-            from("../../../target/$source/release/libsmoldot_light_mobile.a")
-            into("./src/main/cpp/libs/$destination/")
-            rename { "libsmoldot_ffi.a" }
+    doLast {
+        val targets = listOf(
+            "aarch64-linux-android" to "arm64-v8a",
+            "armv7-linux-androideabi" to "armeabi-v7a",
+            "i686-linux-android" to "x86",
+            "x86_64-linux-android" to "x86_64",
+        )
+
+        targets.forEach { (source, destination) ->
+            copy {
+                from("../../../target/$source/release/libsmoldot_light_mobile.a")
+                into("./src/main/cpp/libs/$destination/")
+                rename { "libsmoldot_ffi.a" }
+            }
         }
     }
 }
