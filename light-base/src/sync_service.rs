@@ -404,6 +404,48 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         Err(())
     }
 
+    pub async fn block_query_unknown_hash(
+        self: Arc<Self>,
+        number: u64,
+        fields: codec::BlocksRequestFields,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        _max_parallel: NonZeroU32,
+    ) -> Result<codec::BlockData, ()> {
+        let request_config = codec::BlocksRequestConfig {
+            start: codec::BlocksRequestConfigStart::Number(number),
+            desired_count: NonZeroU32::new(1).unwrap(),
+            direction: codec::BlocksRequestDirection::Ascending,
+            fields: fields.clone(),
+        };
+
+        for target in self
+            .network_service
+            .peers_list()
+            .await
+            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
+        {
+            let mut result = match self
+                .network_service
+                .clone()
+                .blocks_request(target, request_config.clone(), timeout_per_request)
+                .await
+            {
+                Ok(b) if !b.is_empty() => b,
+                Ok(_) | Err(_) => {
+                    // Because we have no idea whether the block is canonical, it might be
+                    // totally legitimate for the peer to refuse the request. For this reason,
+                    // we don't ban it.
+                    continue;
+                }
+            };
+
+            return Ok(result.remove(0));
+        }
+
+        Err(())
+    }
+
     /// Performs one or more storage proof requests in order to fulfill the `requests` passed as
     /// parameter.
     ///
