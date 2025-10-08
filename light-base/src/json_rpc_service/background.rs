@@ -1040,7 +1040,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                             },
                                             3,
                                             Duration::from_secs(8),
-                                            NonZeroU32::new(1).unwrap(),
+                                            NonZero::<u32>::new(1).unwrap(),
                                         )
                                         .await
                                 };

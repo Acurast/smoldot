@@ -30,7 +30,7 @@ use alloc::{
     vec::Vec,
 };
 use async_lock::Mutex;
-use core::{num::NonZeroU32, pin::Pin, str, task};
+use core::{num::NonZero, pin::Pin, str, task};
 use std::ptr::null;
 use futures_util::{stream, Stream as _, StreamExt as _};
 use smoldot_light::HandleRpcError;
@@ -74,8 +74,8 @@ fn add_chain(
             .map(|c| u32::from_le_bytes(<[u8; 4]>::try_from(c).unwrap()))
             .filter_map(|c| {
                 if let Some(init::Chain::Created {
-                                smoldot_chain_id, ..
-                            }) = client_lock.chains.get(usize::try_from(c).ok()?)
+                    smoldot_chain_id, ..
+                }) = client_lock.chains.get(usize::try_from(c).ok()?)
                 {
                     Some(*smoldot_chain_id)
                 } else {
@@ -114,7 +114,7 @@ fn add_chain(
                     database_content: str::from_utf8(&database_content)
                         .unwrap_or_else(|_| panic!("non-utf8 database content")),
                     json_rpc: if let Some(json_rpc_max_pending_requests) =
-                        NonZeroU32::new(json_rpc_max_pending_requests)
+                        NonZero::<u32>::new(json_rpc_max_pending_requests)
                     {
                         smoldot_light::AddChainConfigJsonRpc::Enabled {
                             max_pending_requests: json_rpc_max_pending_requests,
@@ -129,14 +129,12 @@ fn add_chain(
                 Ok(c) => c,
                 Err(error) => {
                     client_lock.chains.remove(outer_chain_id);
-                    unsafe {
-                        let error = error.to_string();
-                        bindings::chain_initialized(
-                            outer_chain_id_u32,
-                            error.as_bytes().as_ptr(),
-                            error.as_bytes().len(),
-                        );
-                    }
+                    let error = error.to_string();
+                    bindings::chain_initialized(
+                        outer_chain_id_u32,
+                        error.as_bytes().as_ptr(),
+                        error.as_bytes().len(),
+                    );
                     return;
                 }
             };
@@ -168,10 +166,7 @@ fn add_chain(
                 *json_rpc_responses_rx = json_rpc_responses;
             }
 
-            unsafe {
-                bindings::chain_initialized(outer_chain_id_u32, null(), 0);
-            }
-
+            bindings::chain_initialized(outer_chain_id_u32, null(), 0);
         },
     );
 

@@ -406,11 +406,11 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         fields: codec::BlocksRequestFields,
         total_attempts: u32,
         timeout_per_request: Duration,
-        _max_parallel: NonZeroU32,
+        _max_parallel: NonZero<u32>,
     ) -> Result<codec::BlockData, ()> {
         let request_config = codec::BlocksRequestConfig {
             start: codec::BlocksRequestConfigStart::Number(number),
-            desired_count: NonZeroU32::new(1).unwrap(),
+            desired_count: NonZero::<u32>::new(1).unwrap(),
             direction: codec::BlocksRequestDirection::Ascending,
             fields: fields.clone(),
         };

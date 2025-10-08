@@ -33,17 +33,17 @@
 
 use std::slice;
 
-extern "C" {
+unsafe extern "C" {
     /// Must stop the execution immediately. The message is a UTF-8 string found
     /// in the memory at offset `message_ptr` and with length `message_len`.
-    pub fn panic(message_ptr: *const u8, message_len: usize);
+    pub unsafe fn panic(message_ptr: *const u8, message_len: usize);
 
     /// Called in response to [`add_chain`] once the initialization of the chain is complete.
     ///
     /// If `error_msg_ptr` is equal to 0, then the chain initialization is successful. Otherwise,
     /// `error_msg_ptr` and `error_msg_len` designate a buffer in the memory of the WebAssembly
     /// virtual machine where a UTF-8 diagnostic error message can be found.
-    pub fn chain_initialized(chain_id: u32, error_msg_ptr: *const u8, error_msg_len: usize);
+    pub safe fn chain_initialized(chain_id: u32, error_msg_ptr: *const u8, error_msg_len: usize);
 
     /// The queue of JSON-RPC responses of the given chain is no longer empty.
     ///
@@ -51,7 +51,7 @@ extern "C" {
     /// of 0.
     ///
     /// This function might be called spuriously, however this behavior must not be relied upon.
-    pub fn json_rpc_responses_non_empty(chain_id: u32);
+    pub unsafe fn json_rpc_responses_non_empty(chain_id: u32);
 
     /// Client is emitting a log entry.
     ///
@@ -59,7 +59,7 @@ extern "C" {
     /// 5 = Trace`), a log target (e.g. "network"), and a log message.
     ///
     /// The log target and message is a UTF-8 string found in the memory at offset `ptr` and with length `len`.
-    pub fn print(
+    pub unsafe fn print(
         level: u32,
         target_ptr: *const u8,
         target_len: usize,
@@ -76,7 +76,7 @@ extern "C" {
 ///
 /// The client will emit log messages by calling the [`print()`] function, provided the log level is
 /// inferior or equal to the value of `max_log_level` passed here.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn init(max_log_level: u32) {
     crate::init(max_log_level);
 }
@@ -105,7 +105,7 @@ pub extern "C" fn init(max_log_level: u32) {
 /// called by smoldot.
 /// It is possible to call [`remove_chain`] while the initialization is still in progress in
 /// order to cancel it.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn add_chain(
     chain_spec_buffer_ptr: *const u8,
     chain_spec_buffer_len: usize,
@@ -129,7 +129,7 @@ pub extern "C" fn add_chain(
 /// subscriptions and cancels all in-progress requests corresponding to that chain.
 ///
 /// Can be called on a chain which hasn't finished initializing yet.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn remove_chain(chain_id: u32) {
     super::remove_chain(chain_id);
 }
@@ -154,7 +154,7 @@ pub extern "C" fn remove_chain(chain_id: u32) {
 /// - 0 on success.
 /// - 1 if the chain has too many pending JSON-RPC requests and refuses to queue another one.
 ///
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn json_rpc_send(text_buffer_ptr: *const u8, text_buffer_len: usize, chain_id: u32) -> u32 {
     super::json_rpc_send(get_buffer(text_buffer_ptr, text_buffer_len), chain_id)
 }
@@ -173,7 +173,7 @@ pub extern "C" fn json_rpc_send(text_buffer_ptr: *const u8, text_buffer_len: usi
 ///
 /// After having read the response or notification, use [`json_rpc_responses_pop`] to remove it
 /// from the queue. You can then call [`json_rpc_responses_peek`] again to read the next response.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn json_rpc_responses_peek(chain_id: u32) -> *const JsonRpcResponseInfo {
     super::json_rpc_responses_peek(chain_id)
 }
@@ -197,7 +197,7 @@ unsafe impl Send for JsonRpcResponseInfo {}
 ///
 /// It is forbidden to call this function on a chain that hasn't finished initializing yet, or a
 /// chain that was created with `json_rpc_running` equal to 0.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn json_rpc_responses_pop(chain_id: u32) {
     super::json_rpc_responses_pop(chain_id);
 }
