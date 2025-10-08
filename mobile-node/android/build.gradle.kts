@@ -1,7 +1,7 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
 plugins {
-    id("com.android.library") version "8.2.1" apply false
-    id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+    id("com.android.library") version "8.13.0" apply false
+    id("org.jetbrains.kotlin.android") version "2.2.20" apply false
 }
 
 buildscript {
@@ -10,6 +10,6 @@ buildscript {
     }
 
     dependencies {
-        classpath("org.mozilla.rust-android-gradle:plugin:0.9.4")
+        classpath("org.mozilla.rust-android-gradle:plugin:0.9.6")
     }
 }

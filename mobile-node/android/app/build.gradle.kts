@@ -8,18 +8,22 @@ plugins {
 object Library {
     const val groupId = "com.github.smoldot"
     const val artifactId = "smoldot-android"
-    const val version = "2.0.29-beta01"
+    const val version = "2.0.39-beta01"
 }
 
 android {
     namespace = Library.groupId
-    compileSdk = 34
-    ndkVersion = "26.3.11579264"
+    compileSdk = 36
+    ndkVersion = "27.2.12479018"
     defaultConfig {
         minSdk = 26
         version = Library.version
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+        }
     }
 
     buildTypes {
@@ -54,14 +58,14 @@ kotlin {
 cargo {
     module = "../../rust"
     libname = "libsmoldot_ffi"
-    targets = listOf("arm", "arm64", "x86", "x86_64")
+    targets = listOf("arm", "arm64")
     profile = "release"
     prebuiltToolchains = true
 }
 
 publishing {
     publications {
-        register<MavenPublication>("maven") {
+        register<MavenPublication>("release") {
             groupId = Library.groupId
             artifactId = Library.artifactId
             version = Library.version
@@ -74,11 +78,11 @@ publishing {
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation("androidx.core:core-ktx:1.17.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.1.5")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
 }
 
 val buildSmoldotFFI: TaskProvider<Task> = tasks.register("buildSmoldotFFI", Task::class.java) {
@@ -88,8 +92,6 @@ val buildSmoldotFFI: TaskProvider<Task> = tasks.register("buildSmoldotFFI", Task
         val targets = listOf(
             "aarch64-linux-android" to "arm64-v8a",
             "armv7-linux-androideabi" to "armeabi-v7a",
-            "i686-linux-android" to "x86",
-            "x86_64-linux-android" to "x86_64",
         )
 
         targets.forEach { (source, destination) ->
