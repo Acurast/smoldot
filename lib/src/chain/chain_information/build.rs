@@ -21,7 +21,7 @@
 //! process of building the chain information of a certain finalized point of a chain.
 
 use alloc::{boxed::Box, vec::Vec};
-use core::{fmt, iter, num::NonZeroU64};
+use core::{fmt, iter, num::NonZero};
 
 use crate::{
     chain::chain_information,
@@ -92,18 +92,20 @@ pub enum InProgress {
 }
 
 /// Problem encountered during the chain building process.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// Error while starting the Wasm virtual machine.
-    #[display(fmt = "While calling {call:?}: {error}")]
+    #[display("While calling {call:?}: {error}")]
     WasmStart {
         call: RuntimeCall,
+        #[error(source)]
         error: host::StartErr,
     },
     /// Error while running the Wasm virtual machine.
-    #[display(fmt = "While calling {call:?}: {error}")]
+    #[display("While calling {call:?}: {error}")]
     WasmVm {
         call: RuntimeCall,
+        #[error(source)]
         error: runtime_call::ErrorDetail,
     },
     /// Runtime has called an offchain worker host function.
@@ -125,7 +127,7 @@ pub enum Error {
     /// Failed to decode the output of the `GrandpaApi_current_set_id` runtime call.
     GrandpaCurrentSetIdOutputDecode,
     /// The combination of the information retrieved from the runtime doesn't make sense together.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     InvalidChainInformation(chain_information::ValidityError),
     /// Multiple consensus algorithms have been detected.
     MultipleConsensusAlgorithms,
@@ -160,9 +162,7 @@ impl RuntimeCall {
     /// Returns the list of parameters to pass when making the call.
     ///
     /// The actual parameters are obtained by putting together all the returned buffers together.
-    pub fn parameter_vectored(
-        &'_ self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_ {
+    pub fn parameter_vectored(&self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
         iter::empty::<Vec<u8>>()
     }
 
@@ -268,12 +268,12 @@ pub struct StorageGet(runtime_call::StorageGet, ChainInformationBuildInner);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -302,12 +302,12 @@ pub struct ClosestDescendantMerkleValue(
 impl ClosestDescendantMerkleValue {
     /// Returns the key whose closest descendant Merkle value must be passed to
     /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&self) -> impl Iterator<Item = Nibble> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -342,12 +342,12 @@ pub struct NextKey(runtime_call::NextKey, ChainInformationBuildInner);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&self) -> impl Iterator<Item = Nibble> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -365,7 +365,7 @@ impl NextKey {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn prefix(&self) -> impl Iterator<Item = Nibble> {
         self.0.prefix()
     }
 
@@ -387,7 +387,9 @@ impl NextKey {
 }
 
 impl ChainInformationBuild {
-    fn necessary_calls(inner: &ChainInformationBuildInner) -> impl Iterator<Item = RuntimeCall> {
+    fn necessary_calls(
+        inner: &ChainInformationBuildInner,
+    ) -> impl Iterator<Item = RuntimeCall> + use<> {
         let aura_api_authorities =
             if inner.runtime_has_aura && inner.aura_autorities_call_output.is_none() {
                 Some(RuntimeCall::AuraApiAuthorities)
@@ -506,7 +508,7 @@ impl ChainInformationBuild {
                     return ChainInformationBuild::Finished {
                         result: Err(Error::WasmStart { call, error }),
                         virtual_machine,
-                    }
+                    };
                 }
             };
 
@@ -525,7 +527,7 @@ impl ChainInformationBuild {
                     return ChainInformationBuild::Finished {
                         result: Err(Error::MultipleConsensusAlgorithms),
                         virtual_machine: inner.virtual_machine.take().unwrap(),
-                    }
+                    };
                 }
                 (false, None, _) => chain_information::ChainInformationConsensus::Unknown,
                 (
@@ -663,7 +665,7 @@ impl ChainInformationBuild {
                     return ChainInformationBuild::Finished {
                         result: Err(Error::InvalidChainInformation(err)),
                         virtual_machine: inner.virtual_machine.take().unwrap(),
-                    }
+                    };
                 }
             };
 
@@ -813,24 +815,24 @@ impl ChainInformationBuild {
                             error: err.detail,
                         }),
                         virtual_machine: err.prototype,
-                    }
+                    };
                 }
                 runtime_call::RuntimeCall::StorageGet(call) => {
                     break ChainInformationBuild::InProgress(InProgress::StorageGet(StorageGet(
                         call, inner,
-                    )))
+                    )));
                 }
                 runtime_call::RuntimeCall::NextKey(call) => {
                     break ChainInformationBuild::InProgress(InProgress::NextKey(NextKey(
                         call, inner,
-                    )))
+                    )));
                 }
                 runtime_call::RuntimeCall::ClosestDescendantMerkleValue(call) => {
                     break ChainInformationBuild::InProgress(
                         InProgress::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
                             call, inner,
                         )),
-                    )
+                    );
                 }
                 runtime_call::RuntimeCall::SignatureVerification(sig) => {
                     call = sig.verify_and_resume();
@@ -883,7 +885,7 @@ struct ChainInformationBuildInner {
     runtime_grandpa_supports_currentsetid: Option<bool>,
 
     /// Output of the call to `AuraApi_slot_duration`, if it was already made.
-    aura_slot_duration_call_output: Option<NonZeroU64>,
+    aura_slot_duration_call_output: Option<NonZero<u64>>,
     /// Output of the call to `AuraApi_authorities`, if it was already made.
     aura_autorities_call_output: Option<Vec<header::AuraAuthority>>,
     /// Output of the call to `BabeApi_current_epoch`, if it was already made.
@@ -899,10 +901,10 @@ struct ChainInformationBuildInner {
 }
 
 /// Decodes the output of a call to `AuraApi_slot_duration`.
-fn decode_aura_slot_duration_output(bytes: &[u8]) -> Result<NonZeroU64, Error> {
+fn decode_aura_slot_duration_output(bytes: &[u8]) -> Result<NonZero<u64>, Error> {
     <[u8; 8]>::try_from(bytes)
         .ok()
-        .and_then(|b| NonZeroU64::new(u64::from_le_bytes(b)))
+        .and_then(|b| NonZero::<u64>::new(u64::from_le_bytes(b)))
         .ok_or(Error::AuraSlotDurationOutputDecode)
 }
 
@@ -918,7 +920,7 @@ fn decode_aura_authorities_output(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BabeGenesisConfiguration {
-    slots_per_epoch: NonZeroU64,
+    slots_per_epoch: NonZero<u64>,
     epoch0_configuration: header::BabeNextConfig,
     epoch0_information: header::BabeNextEpoch,
 }
@@ -928,11 +930,11 @@ fn decode_babe_configuration_output(
     bytes: &[u8],
     is_babe_api_v1: bool,
 ) -> Result<BabeGenesisConfiguration, Error> {
-    let result: nom::IResult<_, _> =
-        nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
-            nom::sequence::tuple((
+    let result: nom::IResult<_, _> = nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
+            (
                 nom::number::streaming::le_u64,
-                nom::combinator::map_opt(nom::number::streaming::le_u64, NonZeroU64::new),
+                nom::combinator::map_opt(nom::number::streaming::le_u64, NonZero::<u64>::new),
                 nom::number::streaming::le_u64,
                 nom::number::streaming::le_u64,
                 nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
@@ -940,10 +942,10 @@ fn decode_babe_configuration_output(
                         num_elems,
                         num_elems,
                         nom::combinator::map(
-                            nom::sequence::tuple((
+                            (
                                 nom::bytes::streaming::take(32u32),
                                 nom::number::streaming::le_u64,
-                            )),
+                            ),
                             move |(public_key, weight)| header::BabeAuthority {
                                 public_key: <[u8; 32]>::try_from(public_key).unwrap(),
                                 weight,
@@ -956,29 +958,35 @@ fn decode_babe_configuration_output(
                 }),
                 |b| {
                     if is_babe_api_v1 {
-                        nom::branch::alt((
-                            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
-                                header::BabeAllowedSlots::PrimarySlots
-                            }),
-                            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
-                                header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
-                            }),
-                        ))(b)
+                        nom::Parser::parse(
+                            &mut nom::branch::alt((
+                                nom::combinator::map(nom::bytes::streaming::tag(&[0][..]), |_| {
+                                    header::BabeAllowedSlots::PrimarySlots
+                                }),
+                                nom::combinator::map(nom::bytes::streaming::tag(&[1][..]), |_| {
+                                    header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
+                                }),
+                            )),
+                            b,
+                        )
                     } else {
-                        nom::branch::alt((
-                            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
-                                header::BabeAllowedSlots::PrimarySlots
-                            }),
-                            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
-                                header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
-                            }),
-                            nom::combinator::map(nom::bytes::streaming::tag(&[2]), |_| {
-                                header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots
-                            }),
-                        ))(b)
+                        nom::Parser::parse(
+                            &mut nom::branch::alt((
+                                nom::combinator::map(nom::bytes::streaming::tag(&[0][..]), |_| {
+                                    header::BabeAllowedSlots::PrimarySlots
+                                }),
+                                nom::combinator::map(nom::bytes::streaming::tag(&[1][..]), |_| {
+                                    header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
+                                }),
+                                nom::combinator::map(nom::bytes::streaming::tag(&[2][..]), |_| {
+                                    header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots
+                                }),
+                            )),
+                            b,
+                        )
                     }
                 },
-            )),
+            ),
             |(_slot_duration, slots_per_epoch, c0, c1, authorities, randomness, allowed_slots)| {
                 // Note that the slot duration is unused as it is not modifiable anyway.
                 BabeGenesisConfiguration {
@@ -993,7 +1001,9 @@ fn decode_babe_configuration_output(
                     },
                 }
             },
-        )))(bytes);
+        ))),
+        bytes,
+    );
 
     match result {
         Ok((_, out)) => Ok(out),
@@ -1005,11 +1015,11 @@ fn decode_babe_configuration_output(
 /// Decodes the output of a call to `BabeApi_current_epoch` (`is_next_epoch` is `false`) or
 /// `BabeApi_next_epoch` (`is_next_epoch` is `true`).
 fn decode_babe_epoch_output(
-    scale_encoded: &'_ [u8],
+    scale_encoded: &[u8],
     is_next_epoch: bool,
 ) -> Result<chain_information::BabeEpochInformation, Error> {
     let mut combinator = nom::combinator::all_consuming(nom::combinator::map(
-        nom::sequence::tuple((
+        (
             nom::number::streaming::le_u64,
             nom::number::streaming::le_u64,
             nom::number::streaming::le_u64,
@@ -1018,10 +1028,10 @@ fn decode_babe_epoch_output(
                     num_elems,
                     num_elems,
                     nom::combinator::map(
-                        nom::sequence::tuple((
+                        (
                             nom::bytes::streaming::take(32u32),
                             nom::number::streaming::le_u64,
-                        )),
+                        ),
                         move |(public_key, weight)| header::BabeAuthority {
                             public_key: <[u8; 32]>::try_from(public_key).unwrap(),
                             weight,
@@ -1041,7 +1051,7 @@ fn decode_babe_epoch_output(
                         nom::Err::Error(nom::error::make_error(b, nom::error::ErrorKind::Verify))
                     })
             },
-        )),
+        ),
         |(
             epoch_index,
             start_slot_number,
@@ -1071,7 +1081,8 @@ fn decode_babe_epoch_output(
         },
     ));
 
-    let result: Result<_, nom::Err<nom::error::Error<&'_ [u8]>>> = combinator(scale_encoded);
+    let result: Result<_, nom::Err<nom::error::Error<&[u8]>>> =
+        nom::Parser::parse(&mut combinator, scale_encoded);
     match result {
         Ok((_, info)) => Ok(info),
         Err(_) => Err(if is_next_epoch {
@@ -1087,26 +1098,33 @@ fn decode_babe_epoch_output(
 fn decode_grandpa_authorities_output(
     scale_encoded: &[u8],
 ) -> Result<Vec<header::GrandpaAuthority>, Error> {
-    let result: nom::IResult<_, _> = nom::combinator::all_consuming(nom::combinator::complete(
-        nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-            nom::multi::fold_many_m_n(
-                num_elems,
-                num_elems,
-                nom::sequence::tuple((
-                    nom::bytes::streaming::take(32u32),
-                    nom::combinator::map_opt(nom::number::streaming::le_u64, NonZeroU64::new),
-                )),
-                move || Vec::with_capacity(num_elems),
-                |mut acc, (public_key, weight)| {
-                    acc.push(header::GrandpaAuthority {
-                        public_key: <[u8; 32]>::try_from(public_key).unwrap(),
-                        weight,
-                    });
-                    acc
-                },
-            )
-        }),
-    ))(scale_encoded);
+    let result: nom::IResult<_, _> = nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::flat_map(
+            crate::util::nom_scale_compact_usize,
+            |num_elems| {
+                nom::multi::fold_many_m_n(
+                    num_elems,
+                    num_elems,
+                    (
+                        nom::bytes::streaming::take(32u32),
+                        nom::combinator::map_opt(
+                            nom::number::streaming::le_u64,
+                            NonZero::<u64>::new,
+                        ),
+                    ),
+                    move || Vec::with_capacity(num_elems),
+                    |mut acc, (public_key, weight)| {
+                        acc.push(header::GrandpaAuthority {
+                            public_key: <[u8; 32]>::try_from(public_key).unwrap(),
+                            weight,
+                        });
+                        acc
+                    },
+                )
+            },
+        ))),
+        scale_encoded,
+    );
 
     match result {
         Ok((_, out)) => Ok(out),
@@ -1128,7 +1146,7 @@ fn decode_grandpa_current_set_id_output(bytes: &[u8]) -> Result<u64, Error> {
 #[cfg(test)]
 mod tests {
     use crate::header;
-    use core::num::NonZeroU64;
+    use core::num::NonZero;
 
     #[test]
     fn decode_babe_epoch_output_sample_decode() {
@@ -1174,7 +1192,7 @@ mod tests {
         assert_eq!(
             super::decode_babe_configuration_output(&data, true).unwrap(),
             super::BabeGenesisConfiguration {
-                slots_per_epoch: NonZeroU64::new(600).unwrap(),
+                slots_per_epoch: NonZero::<u64>::new(600).unwrap(),
                 epoch0_configuration: header::BabeNextConfig {
                     allowed_slots: header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots,
                     c: (1, 4),

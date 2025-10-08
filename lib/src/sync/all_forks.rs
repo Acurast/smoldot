@@ -81,12 +81,7 @@ use crate::{
 };
 
 use alloc::{borrow::ToOwned as _, boxed::Box, vec::Vec};
-use core::{
-    cmp, mem,
-    num::{NonZeroU32, NonZeroU64},
-    ops,
-    time::Duration,
-};
+use core::{cmp, mem, num::NonZero, ops, time::Duration};
 
 mod disjoint;
 mod pending_blocks;
@@ -160,7 +155,7 @@ pub struct Config {
     /// because of malicious sources.
     ///
     /// The higher the value, the more bandwidth is potentially wasted.
-    pub max_requests_per_block: NonZeroU32,
+    pub max_requests_per_block: NonZero<u32>,
 
     /// If true, the body of a block is downloaded (if necessary) before a
     /// [`ProcessOne::BlockVerify`] is generated.
@@ -446,7 +441,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
     /// Builds a [`chain_information::ChainInformationRef`] struct corresponding to the current
     /// latest finalized block. Can later be used to reconstruct a chain.
-    pub fn as_chain_information(&self) -> chain_information::ValidChainInformationRef {
+    pub fn as_chain_information(&'_ self) -> chain_information::ValidChainInformationRef<'_> {
         self.chain.as_chain_information()
     }
 
@@ -491,9 +486,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
     /// Returns the header of all known non-finalized blocks in the chain without any specific
     /// order.
-    pub fn non_finalized_blocks_unordered(
-        &'_ self,
-    ) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
+    pub fn non_finalized_blocks_unordered(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> {
         self.chain.iter_unordered()
     }
 
@@ -503,7 +496,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// their children.
     pub fn non_finalized_blocks_ancestry_order(
         &'_ self,
-    ) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
+    ) -> impl Iterator<Item = header::HeaderRef<'_>> {
         self.chain.iter_ancestry_order()
     }
 
@@ -513,10 +506,10 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// block referenced by `best_block_number` and `best_block_hash`. It returns an enum that
     /// allows performing the actual insertion.
     pub fn prepare_add_source(
-        &mut self,
+        &'_ mut self,
         best_block_number: u64,
         best_block_hash: [u8; 32],
-    ) -> AddSource<TBl, TRq, TSrc> {
+    ) -> AddSource<'_, TBl, TRq, TSrc> {
         if best_block_number <= self.chain.finalized_block_height() {
             return AddSource::OldBestBlock(AddSourceOldBlock {
                 inner: self,
@@ -576,7 +569,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     }
 
     /// Returns the list of sources in this state machine.
-    pub fn sources(&'_ self) -> impl ExactSizeIterator<Item = SourceId> + '_ {
+    pub fn sources(&self) -> impl ExactSizeIterator<Item = SourceId> {
         self.inner.blocks.sources()
     }
 
@@ -618,7 +611,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         &'a self,
         height: u64,
         hash: &[u8; 32],
-    ) -> impl Iterator<Item = SourceId> + 'a {
+    ) -> impl Iterator<Item = SourceId> + use<'a, TBl, TRq, TSrc> {
         self.inner.blocks.knows_non_finalized_block(height, hash)
     }
 
@@ -669,9 +662,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// This method doesn't modify the state machine in any way. [`AllForksSync::add_request`]
     /// must be called in order for the request to actually be marked as started.
-    pub fn desired_requests(
-        &'_ self,
-    ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestParams)> + '_ {
+    pub fn desired_requests(&self) -> impl Iterator<Item = (SourceId, &TSrc, RequestParams)> {
         // Query justifications of blocks that are necessary in order for finality to progress
         // against sources that have reported these blocks as finalized.
         // TODO: make it clear in the API docs that justifications should be requested as part of a request
@@ -696,7 +687,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                                 RequestParams {
                                     first_block_hash: *block_hash,
                                     first_block_height: block_height,
-                                    num_blocks: NonZeroU64::new(1).unwrap(),
+                                    num_blocks: NonZero::<u64>::new(1).unwrap(),
                                 },
                             )
                         })
@@ -748,7 +739,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// > **Note**: It is in no way mandatory to actually call this function and cancel the
     /// >           requests that are returned.
-    pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = (RequestId, &'_ TRq)> + '_ {
+    pub fn obsolete_requests(&self) -> impl Iterator<Item = (RequestId, &TRq)> {
         // TODO: requests meant to query justifications only are considered obsolete by the underlying state machine, which right now is okay because the underlying state machine is pretty loose in its definition of obsolete
         self.inner.blocks.obsolete_requests()
     }
@@ -779,9 +770,9 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Panics if the [`RequestId`] is invalid.
     ///
     pub fn finish_request(
-        &mut self,
+        &'_ mut self,
         request_id: RequestId,
-    ) -> (TRq, FinishRequest<TBl, TRq, TSrc>) {
+    ) -> (TRq, FinishRequest<'_, TBl, TRq, TSrc>) {
         // Sets the `occupation` of `source_id` back to `AllSync`.
         let (
             pending_blocks::RequestParams {
@@ -818,11 +809,11 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Panics if `source_id` is invalid.
     ///
     pub fn block_announce(
-        &mut self,
+        &'_ mut self,
         source_id: SourceId,
         announced_scale_encoded_header: Vec<u8>,
         is_best: bool,
-    ) -> BlockAnnounceOutcome<TBl, TRq, TSrc> {
+    ) -> BlockAnnounceOutcome<'_, TBl, TRq, TSrc> {
         let announced_header = match header::decode(
             &announced_scale_encoded_header,
             self.chain.block_number_bytes(),
@@ -1908,8 +1899,8 @@ impl<TBl, TRq, TSrc> BlockVerify<TBl, TRq, TSrc> {
     ///
     /// This is `Some` if and only if [`Config::download_bodies`] is `true`
     pub fn scale_encoded_extrinsics(
-        &'_ self,
-    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
+        &self,
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone> {
         if self.parent.inner.blocks.downloading_bodies() {
             Some(
                 self.parent
@@ -2062,8 +2053,8 @@ impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
     ///
     /// This is `Some` if and only if [`Config::download_bodies`] is `true`
     pub fn scale_encoded_extrinsics(
-        &'_ self,
-    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
+        &self,
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone> {
         if self.parent.inner.blocks.downloading_bodies() {
             Some(
                 self.parent
@@ -2221,7 +2212,7 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                         return (
                             self.parent,
                             FinalityProofVerifyOutcome::GrandpaCommitError(err),
-                        )
+                        );
                     }
                 }
             }
@@ -2247,7 +2238,7 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                         return (
                             self.parent,
                             FinalityProofVerifyOutcome::JustificationError(err),
-                        )
+                        );
                     }
                 }
             }
@@ -2347,14 +2338,14 @@ pub enum HeaderVerifyOutcome<TBl, TRq, TSrc> {
 }
 
 /// Error that can happen when verifying a block header.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum HeaderVerifyError {
     /// Block can't be verified as it uses an unknown consensus engine.
     UnknownConsensusEngine,
     /// Block uses a different consensus than the rest of the chain.
     ConsensusMismatch,
     /// The block verification has failed. The block is invalid and should be thrown away.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     VerificationFailed(verify::header_only::Error),
 }
 

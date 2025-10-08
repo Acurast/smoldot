@@ -23,12 +23,12 @@ use crate::{
 use alloc::{boxed::Box, string::String};
 use core::{pin, time::Duration};
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream::FuturesUnordered, StreamExt as _};
+use futures_util::{StreamExt as _, future, stream::FuturesUnordered};
 use smoldot::{libp2p::collection::SubstreamFate, network::service};
 
 /// Asynchronous task managing a specific single-stream connection.
 pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
-    mut connection: TPlat::Stream,
+    connection: TPlat::Stream,
     address_string: String,
     platform: TPlat,
     connection_id: service::ConnectionId,
@@ -229,7 +229,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     platform: TPlat,
     connection_id: service::ConnectionId,
     mut connection_task: service::MultiStreamConnectionTask<TPlat::Instant, usize>,
-    mut coordinator_to_connection: async_channel::Receiver<service::CoordinatorToConnection>,
+    coordinator_to_connection: async_channel::Receiver<service::CoordinatorToConnection>,
     connection_to_coordinator: async_channel::Sender<(
         service::ConnectionId,
         service::ConnectionToCoordinator,
@@ -244,7 +244,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     // Stream that yields an item whenever a substream is ready to be read-written.
     // TODO: we box the future because of the type checker being annoying
     let mut when_substreams_rw_ready = FuturesUnordered::<
-        pin::Pin<Box<dyn future::Future<Output = (pin::Pin<Box<TPlat::Stream>>, usize)> + Send>>,
+        pin::Pin<Box<dyn Future<Output = (pin::Pin<Box<TPlat::Stream>>, usize)> + Send>>,
     >::new();
     // Identifier to assign to the next substream.
     // TODO: weird API

@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{consensus_service, database_thread, network_service, LogCallback, LogLevel};
+use crate::{LogCallback, LogLevel, consensus_service, database_thread, network_service};
 use futures_channel::oneshot;
 use futures_util::FutureExt;
 use smol::{
@@ -24,14 +24,13 @@ use smol::{
 };
 use smoldot::json_rpc::{methods, service};
 use std::{
-    future::Future,
     io, mem,
     net::SocketAddr,
-    num::{NonZeroU32, NonZeroUsize},
+    num::NonZero,
     pin::Pin,
     sync::{
-        atomic::{AtomicU32, Ordering},
         Arc,
+        atomic::{AtomicU32, Ordering},
     },
     time::Duration,
 };
@@ -125,7 +124,7 @@ impl JsonRpcService {
                             return Err(InitError::ListenError {
                                 bind_address: *addr,
                                 error,
-                            })
+                            });
                         }
                     };
 
@@ -135,7 +134,7 @@ impl JsonRpcService {
                     return Err(InitError::ListenError {
                         bind_address: *addr,
                         error,
-                    })
+                    });
                 }
             },
             None => (None, None),
@@ -149,12 +148,11 @@ impl JsonRpcService {
         let (virtual_client_main_task, virtual_client_io) =
             service::client_main_task(service::Config {
                 max_active_subscriptions: u32::MAX,
-                max_pending_requests: NonZeroU32::new(u32::MAX).unwrap(),
+                max_pending_requests: NonZero::<u32>::new(u32::MAX).unwrap(),
             });
 
         spawn_client_main_task(
             config.tasks_executor.clone(),
-            config.log_callback.clone(),
             config.consensus_service.clone(),
             config.database.clone(),
             to_requests_handlers.clone(),
@@ -164,9 +162,8 @@ impl JsonRpcService {
         let runtime_caches_service = Arc::new(runtime_caches_service::RuntimeCachesService::new(
             runtime_caches_service::Config {
                 tasks_executor: config.tasks_executor.clone(),
-                log_callback: config.log_callback.clone(),
                 database: config.database.clone(),
-                num_cache_entries: NonZeroUsize::new(16).unwrap(), // TODO: configurable?
+                num_cache_entries: NonZero::<usize>::new(16).unwrap(), // TODO: configurable?
             },
         ));
 
@@ -245,14 +242,15 @@ impl JsonRpcService {
 }
 
 /// Error potentially returned by [`JsonRpcService::new`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum InitError {
     /// Failed to listen on the server address.
-    #[display(fmt = "Failed to listen on TCP address {bind_address}: {error}")]
+    #[display("Failed to listen on TCP address {bind_address}: {error}")]
     ListenError {
         /// Address that was attempted.
         bind_address: SocketAddr,
         /// Error returned by the operating system.
+        #[error(source)]
         error: io::Error,
     },
 }
@@ -351,7 +349,7 @@ impl JsonRpcBackground {
             );
             let (client_main_task, io) = service::client_main_task(service::Config {
                 max_active_subscriptions: 128,
-                max_pending_requests: NonZeroU32::new(64).unwrap(),
+                max_pending_requests: NonZero::<u32>::new(64).unwrap(),
             });
             spawn_client_io_task(
                 &self.tasks_executor,
@@ -363,7 +361,6 @@ impl JsonRpcBackground {
             );
             spawn_client_main_task(
                 self.tasks_executor.clone(),
-                self.log_callback.clone(),
                 self.consensus_service.clone(),
                 self.database.clone(),
                 self.to_requests_handlers.clone(),
@@ -547,7 +544,6 @@ fn spawn_client_io_task(
 
 fn spawn_client_main_task(
     tasks_executor: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
-    log_callback: Arc<dyn LogCallback + Send + Sync>,
     consensus_service: Arc<consensus_service::ConsensusService>,
     database: Arc<database_thread::DatabaseThread>,
     to_requests_handlers: async_channel::Sender<requests_handler::Message>,
@@ -649,7 +645,6 @@ fn spawn_client_main_task(
                                 chain_head_subscriptions::spawn_chain_head_subscription_task(
                                     chain_head_subscriptions::Config {
                                         tasks_executor: tasks_executor.clone(),
-                                        log_callback: log_callback.clone(),
                                         receiver: rx,
                                         chain_head_follow_subscription: subscription_start,
                                         with_runtime,

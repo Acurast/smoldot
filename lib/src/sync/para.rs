@@ -62,7 +62,7 @@ pub enum OccupiedCoreAssumption {
 
 impl OccupiedCoreAssumption {
     /// Returns the SCALE encoding of this type.
-    pub fn scale_encoded(&self) -> impl AsRef<[u8]> + Clone {
+    pub fn scale_encoded(&self) -> impl AsRef<[u8]> + Clone + use<> {
         match self {
             OccupiedCoreAssumption::Included => [0],
             OccupiedCoreAssumption::TimedOut => [1],
@@ -74,12 +74,15 @@ impl OccupiedCoreAssumption {
 /// Attempt to decode the return value of the `ParachainHost_persisted_validation_data` runtime
 /// call.
 pub fn decode_persisted_validation_data_return_value(
-    scale_encoded: &[u8],
+    scale_encoded: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<Option<PersistedValidationDataRef>, Error> {
-    let res: Result<_, nom::Err<nom::error::Error<_>>> = nom::combinator::all_consuming(
-        crate::util::nom_option_decode(persisted_validation_data(block_number_bytes)),
-    )(scale_encoded);
+) -> Result<Option<PersistedValidationDataRef<'_>>, Error> {
+    let res: Result<_, nom::Err<nom::error::Error<_>>> = nom::Parser::parse(
+        &mut nom::combinator::all_consuming(crate::util::nom_option_decode(
+            persisted_validation_data(block_number_bytes),
+        )),
+        scale_encoded,
+    );
     match res {
         Ok((_, data)) => Ok(data),
         Err(nom::Err::Error(err) | nom::Err::Failure(err)) => Err(Error(err.code)),
@@ -88,9 +91,10 @@ pub fn decode_persisted_validation_data_return_value(
 }
 
 /// Error that can happen during the decoding.
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Error decoding persisted validation data")]
-pub struct Error(nom::error::ErrorKind);
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("Error decoding persisted validation data")]
+// TODO: nom doesn't implement the Error trait; remove not(source) at some point
+pub struct Error(#[error(not(source))] nom::error::ErrorKind);
 
 /// Decoded persisted validation data.
 // TODO: document and explain
@@ -111,14 +115,14 @@ pub struct PersistedValidationDataRef<'a> {
 /// `Nom` combinator that parses a [`PersistedValidationDataRef`].
 fn persisted_validation_data<'a, E: nom::error::ParseError<&'a [u8]>>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], PersistedValidationDataRef, E> {
+) -> impl nom::Parser<&'a [u8], Output = PersistedValidationDataRef<'a>, Error = E> {
     nom::combinator::map(
-        nom::sequence::tuple((
+        (
             crate::util::nom_bytes_decode,
             crate::util::nom_varsize_number_decode_u64(block_number_bytes),
             nom::bytes::streaming::take(32u32),
             nom::number::streaming::le_u32,
-        )),
+        ),
         |(parent_head, relay_parent_number, relay_parent_storage_root, max_pov_size)| {
             PersistedValidationDataRef {
                 parent_head,

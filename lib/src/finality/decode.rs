@@ -22,13 +22,17 @@ use core::fmt;
 
 /// Attempt to decode the given SCALE-encoded justification.
 pub fn decode_grandpa_justification(
-    scale_encoded: &[u8],
+    scale_encoded: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<GrandpaJustificationRef, JustificationDecodeError> {
-    match nom::combinator::complete(nom::combinator::all_consuming(grandpa_justification(
-        block_number_bytes,
-    )))(scale_encoded)
-    {
+) -> Result<GrandpaJustificationRef<'_>, JustificationDecodeError> {
+    match nom::Parser::parse(
+        &mut nom::combinator::complete(nom::combinator::all_consuming::<
+            _,
+            nom::error::Error<&[u8]>,
+            _,
+        >(grandpa_justification(block_number_bytes))),
+        scale_encoded,
+    ) {
         Ok((_, justification)) => Ok(justification),
         Err(nom::Err::Error(err) | nom::Err::Failure(err)) => {
             Err(JustificationDecodeError(err.code))
@@ -42,10 +46,15 @@ pub fn decode_grandpa_justification(
 /// Contrary to [`decode_grandpa_justification`], doesn't return an error if the slice is too long
 /// but returns the remainder.
 pub fn decode_partial_grandpa_justification(
-    scale_encoded: &[u8],
+    scale_encoded: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<(GrandpaJustificationRef, &[u8]), JustificationDecodeError> {
-    match nom::combinator::complete(grandpa_justification(block_number_bytes))(scale_encoded) {
+) -> Result<(GrandpaJustificationRef<'_>, &'_ [u8]), JustificationDecodeError> {
+    match nom::Parser::parse(
+        &mut nom::combinator::complete(grandpa_justification::<nom::error::Error<&[u8]>>(
+            block_number_bytes,
+        )),
+        scale_encoded,
+    ) {
         Ok((remainder, justification)) => Ok((justification, remainder)),
         Err(nom::Err::Error(err) | nom::Err::Failure(err)) => {
             Err(JustificationDecodeError(err.code))
@@ -78,10 +87,13 @@ pub struct GrandpaJustification {
 
 /// Attempt to decode the given SCALE-encoded Grandpa commit.
 pub fn decode_grandpa_commit(
-    scale_encoded: &[u8],
+    scale_encoded: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<CommitMessageRef, CommitDecodeError> {
-    match nom::combinator::all_consuming(commit_message(block_number_bytes))(scale_encoded) {
+) -> Result<CommitMessageRef<'_>, CommitDecodeError<'_>> {
+    match nom::Parser::parse(
+        &mut nom::combinator::all_consuming(commit_message(block_number_bytes)),
+        scale_encoded,
+    ) {
         Ok((_, commit)) => Ok(commit),
         Err(err) => Err(CommitDecodeError(err)),
     }
@@ -92,18 +104,19 @@ pub fn decode_grandpa_commit(
 /// Contrary to [`decode_grandpa_commit`], doesn't return an error if the slice is too long, but
 /// returns the remainder.
 pub fn decode_partial_grandpa_commit(
-    scale_encoded: &[u8],
+    scale_encoded: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<(CommitMessageRef, &[u8]), CommitDecodeError> {
-    match commit_message(block_number_bytes)(scale_encoded) {
+) -> Result<(CommitMessageRef<'_>, &'_ [u8]), CommitDecodeError<'_>> {
+    match nom::Parser::parse(&mut commit_message(block_number_bytes), scale_encoded) {
         Ok((remainder, commit)) => Ok((commit, remainder)),
         Err(err) => Err(CommitDecodeError(err)),
     }
 }
 
 /// Error potentially returned by [`decode_grandpa_commit`].
-#[derive(Debug, derive_more::Display)]
-pub struct CommitDecodeError<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+// TODO: nom::Err doesn't implement the Error trait at the moment; remove error(not(source)) eventually
+pub struct CommitDecodeError<'a>(#[error(not(source))] nom::Err<nom::error::Error<&'a [u8]>>);
 
 // TODO: document and explain
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,7 +177,7 @@ pub struct PrecommitsRef<'a> {
     inner: PrecommitsRefInner<'a>,
 }
 
-impl<'a> fmt::Debug for PrecommitsRef<'a> {
+impl fmt::Debug for PrecommitsRef<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_list().entries(self.iter()).finish()
     }
@@ -180,7 +193,7 @@ enum PrecommitsRefInner<'a> {
 }
 
 impl<'a> PrecommitsRef<'a> {
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = PrecommitRef<'a>> + 'a {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = PrecommitRef<'a>> + use<'a> {
         match self.inner {
             PrecommitsRefInner::Undecoded {
                 data,
@@ -230,7 +243,11 @@ impl<'a> Iterator for PrecommitsRefIter<'a> {
                     return None;
                 }
 
-                let (new_pointer, precommit) = precommit(*block_number_bytes)(pointer).unwrap();
+                let (new_pointer, precommit) = nom::Parser::parse(
+                    &mut precommit::<nom::error::Error<&[u8]>>(*block_number_bytes),
+                    pointer,
+                )
+                .unwrap();
                 *pointer = new_pointer;
                 *remaining_len -= 1;
 
@@ -249,7 +266,7 @@ impl<'a> Iterator for PrecommitsRefIter<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for PrecommitsRefIter<'a> {}
+impl ExactSizeIterator for PrecommitsRefIter<'_> {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrecommitRef<'a> {
@@ -267,15 +284,18 @@ pub struct PrecommitRef<'a> {
     pub authority_public_key: &'a [u8; 32],
 }
 
-impl<'a> PrecommitRef<'a> {
+impl PrecommitRef<'_> {
     /// Decodes a SCALE-encoded precommit.
     ///
     /// Returns the rest of the data alongside with the decoded struct.
     pub fn decode_partial(
-        scale_encoded: &[u8],
+        scale_encoded: &'_ [u8],
         block_number_bytes: usize,
-    ) -> Result<(PrecommitRef, &[u8]), JustificationDecodeError> {
-        match precommit(block_number_bytes)(scale_encoded) {
+    ) -> Result<(PrecommitRef<'_>, &'_ [u8]), JustificationDecodeError> {
+        match nom::Parser::parse(
+            &mut precommit::<nom::error::Error<&[u8]>>(block_number_bytes),
+            scale_encoded,
+        ) {
             Ok((remainder, precommit)) => Ok((precommit, remainder)),
             Err(nom::Err::Error(err) | nom::Err::Failure(err)) => {
                 Err(JustificationDecodeError(err.code))
@@ -356,27 +376,31 @@ impl<'a> Iterator for VotesAncestriesIter<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for VotesAncestriesIter<'a> {}
+impl ExactSizeIterator for VotesAncestriesIter<'_> {}
 
 /// Potential error when decoding a Grandpa justification.
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Justification parsing error: {_0:?}")]
-pub struct JustificationDecodeError(nom::error::ErrorKind);
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+// TODO: nom::Err doesn't implement the Error trait at the moment; remove error(not(source)) eventually
+#[display("Justification parsing error: {_0:?}")]
+pub struct JustificationDecodeError(#[error(not(source))] nom::error::ErrorKind);
 
 /// `Nom` combinator that parses a justification.
-fn grandpa_justification<'a>(
+fn grandpa_justification<
+    'a,
+    E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>,
+>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], GrandpaJustificationRef> {
+) -> impl nom::Parser<&'a [u8], Output = GrandpaJustificationRef<'a>, Error = E> {
     nom::error::context(
         "grandpa_justification",
         nom::combinator::map(
-            nom::sequence::tuple((
+            (
                 nom::number::streaming::le_u64,
                 nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
                 precommits(block_number_bytes),
                 votes_ancestries(block_number_bytes),
-            )),
+            ),
             |(round, target_hash, target_number, precommits, votes_ancestries)| {
                 GrandpaJustificationRef {
                     round,
@@ -391,9 +415,9 @@ fn grandpa_justification<'a>(
 }
 
 /// `Nom` combinator that parses a list of precommits.
-fn precommits<'a>(
+fn precommits<'a, E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], PrecommitsRef> {
+) -> impl nom::Parser<&'a [u8], Output = PrecommitsRef<'a>, Error = E> {
     nom::combinator::map(
         nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
             nom::combinator::recognize(nom::multi::fold_many_m_n(
@@ -414,18 +438,18 @@ fn precommits<'a>(
 }
 
 /// `Nom` combinator that parses a single precommit.
-fn precommit<'a>(
+fn precommit<'a, E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], PrecommitRef> {
+) -> impl nom::Parser<&'a [u8], Output = PrecommitRef<'a>, Error = E> {
     nom::error::context(
         "precommit",
         nom::combinator::map(
-            nom::sequence::tuple((
+            (
                 nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
                 nom::bytes::streaming::take(64u32),
                 nom::bytes::streaming::take(32u32),
-            )),
+            ),
             |(target_hash, target_number, signature, authority_public_key)| PrecommitRef {
                 target_hash: TryFrom::try_from(target_hash).unwrap(),
                 target_number,
@@ -437,9 +461,12 @@ fn precommit<'a>(
 }
 
 /// `Nom` combinator that parses a list of headers.
-fn votes_ancestries<'a>(
+fn votes_ancestries<
+    'a,
+    E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>,
+>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], VotesAncestriesIter> {
+) -> impl nom::Parser<&'a [u8], Output = VotesAncestriesIter<'a>, Error = E> {
     nom::error::context(
         "votes ancestries",
         nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
@@ -470,13 +497,13 @@ fn votes_ancestries<'a>(
     )
 }
 
-fn commit_message<'a>(
+fn commit_message<'a, E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], CommitMessageRef> {
+) -> impl nom::Parser<&'a [u8], Output = CommitMessageRef<'a>, Error = E> {
     nom::error::context(
         "commit_message",
         nom::combinator::map(
-            nom::sequence::tuple((
+            (
                 nom::number::streaming::le_u64,
                 nom::number::streaming::le_u64,
                 nom::bytes::streaming::take(32u32),
@@ -493,10 +520,10 @@ fn commit_message<'a>(
                         num_elems,
                         num_elems,
                         nom::combinator::map(
-                            nom::sequence::tuple((
+                            (
                                 nom::bytes::streaming::take(64u32),
                                 nom::bytes::streaming::take(32u32),
-                            )),
+                            ),
                             |(sig, pubkey)| {
                                 (
                                     <&[u8; 64]>::try_from(sig).unwrap(),
@@ -506,7 +533,7 @@ fn commit_message<'a>(
                         ),
                     )
                 }),
-            )),
+            ),
             |(round_number, set_id, target_hash, target_number, precommits, auth_data)| {
                 CommitMessageRef {
                     round_number,
@@ -521,16 +548,19 @@ fn commit_message<'a>(
     )
 }
 
-fn unsigned_precommit<'a>(
+fn unsigned_precommit<
+    'a,
+    E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>,
+>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], UnsignedPrecommitRef> {
+) -> impl nom::Parser<&'a [u8], Output = UnsignedPrecommitRef<'a>, Error = E> {
     nom::error::context(
         "unsigned_precommit",
         nom::combinator::map(
-            nom::sequence::tuple((
+            (
                 nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
-            )),
+            ),
             |(target_hash, target_number)| UnsignedPrecommitRef {
                 target_hash: <&[u8; 32]>::try_from(target_hash).unwrap(),
                 target_number,

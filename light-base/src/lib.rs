@@ -86,8 +86,8 @@
 extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
-use core::{num::NonZeroU32, ops, time::Duration};
-use hashbrown::{hash_map::Entry, HashMap};
+use core::{num::NonZero, ops, time::Duration};
+use hashbrown::{HashMap, hash_map::Entry};
 use itertools::Itertools as _;
 use platform::PlatformRef;
 use smoldot::{
@@ -162,7 +162,7 @@ pub enum AddChainConfigJsonRpc {
         /// completely reasonable.
         ///
         /// A typical value is 128.
-        max_pending_requests: NonZeroU32,
+        max_pending_requests: NonZero<u32>,
 
         /// Maximum number of active subscriptions that can be started through JSON-RPC functions.
         /// Any request that causes the JSON-RPC server to generate notifications counts as a
@@ -278,7 +278,7 @@ struct RunningChain<TPlat: platform::PlatformRef> {
 
     /// Number of elements in [`Client::public_api_chains`] that reference this chain. If this
     /// number reaches `0`, the [`RunningChain`] should be destroyed.
-    num_references: NonZeroU32,
+    num_references: NonZero<u32>,
 }
 
 struct ChainServices<TPlat: platform::PlatformRef> {
@@ -598,7 +598,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // consumed below.
         let chain_spec_chain_id = chain_spec.id().to_owned();
 
-        // The key generated here uniquely identifies this chain within smoldot. Mutiple chains
+        // The key generated here uniquely identifies this chain within smoldot. Multiple chains
         // having the same key will use the same services.
         //
         // This struct is extremely important from a security perspective. We want multiple
@@ -866,7 +866,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 let entry = entry.insert(RunningChain {
                     services,
                     log_name,
-                    num_references: NonZeroU32::new(1).unwrap(),
+                    num_references: NonZero::<u32>::new(1).unwrap(),
                 });
 
                 (&mut entry.services, &entry.log_name)
@@ -1010,7 +1010,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             chains_by_key.remove(&removed_chain.key);
         } else {
             running_chain.num_references =
-                NonZeroU32::new(running_chain.num_references.get() - 1).unwrap();
+                NonZero::<u32>::new(running_chain.num_references.get() - 1).unwrap();
         }
 
         self.public_api_chains.shrink_to_fit();
@@ -1083,29 +1083,29 @@ impl<TPlat: platform::PlatformRef, TChain> ops::IndexMut<ChainId> for Client<TPl
 }
 
 /// Error potentially returned by [`Client::add_chain`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum AddChainError {
     /// Failed to decode the specification of the chain.
-    #[display(fmt = "Failed to decode chain specification: {_0}")]
+    #[display("Failed to decode chain specification: {_0}")]
     ChainSpecParseError(chain_spec::ParseError),
     /// The chain specification must contain either the storage of the genesis block, or a
     /// checkpoint. Neither was provided.
-    #[display(fmt = "Either a checkpoint or the genesis storage must be provided")]
+    #[display("Either a checkpoint or the genesis storage must be provided")]
     ChainSpecNeitherGenesisStorageNorCheckpoint,
     /// Checkpoint provided in the chain specification is invalid.
-    #[display(fmt = "Invalid checkpoint in chain specification: {_0}")]
+    #[display("Invalid checkpoint in chain specification: {_0}")]
     InvalidCheckpoint(chain_spec::CheckpointToChainInformationError),
     /// Failed to build the information about the chain from the genesis storage. This indicates
     /// invalid data in the genesis storage.
-    #[display(fmt = "Failed to build genesis chain information: {_0}")]
+    #[display("Failed to build genesis chain information: {_0}")]
     InvalidGenesisStorage(chain_spec::FromGenesisStorageError),
     /// The list of potential relay chains doesn't contain any relay chain with the name indicated
     /// in the chain specification of the parachain.
-    #[display(fmt = "Couldn't find relevant relay chain")]
+    #[display("Couldn't find relevant relay chain")]
     NoRelayChainFound,
     /// The list of potential relay chains contains more than one relay chain with the name
     /// indicated in the chain specification of the parachain.
-    #[display(fmt = "Multiple relevant relay chains found")]
+    #[display("Multiple relevant relay chains found")]
     MultipleRelayChains,
 }
 
@@ -1288,9 +1288,9 @@ fn start_services<TPlat: platform::PlatformRef>(
             sync_service: sync_service.clone(),
             runtime_service: runtime_service.clone(),
             network_service: network_service_chain.clone(),
-            max_pending_transactions: NonZeroU32::new(64).unwrap(),
-            max_concurrent_downloads: NonZeroU32::new(3).unwrap(),
-            max_concurrent_validations: NonZeroU32::new(2).unwrap(),
+            max_pending_transactions: NonZero::<u32>::new(64).unwrap(),
+            max_concurrent_downloads: NonZero::<u32>::new(3).unwrap(),
+            max_concurrent_validations: NonZero::<u32>::new(2).unwrap(),
         },
     ));
 

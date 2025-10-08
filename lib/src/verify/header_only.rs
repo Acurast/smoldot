@@ -22,7 +22,7 @@ use crate::{
 };
 
 use alloc::vec::Vec;
-use core::{num::NonZeroU64, time::Duration};
+use core::{num::NonZero, time::Duration};
 
 /// Configuration for a block verification.
 pub struct Config<'a> {
@@ -73,7 +73,7 @@ pub enum ConfigConsensus<'a> {
 
         /// Duration of a slot in milliseconds.
         /// Can be found by calling the `AuraApi_slot_duration` runtime function.
-        slot_duration: NonZeroU64,
+        slot_duration: NonZero<u64>,
 
         /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
         /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
@@ -83,7 +83,7 @@ pub enum ConfigConsensus<'a> {
     /// Chain is using the Babe consensus engine.
     Babe {
         /// Number of slots per epoch in the Babe configuration.
-        slots_per_epoch: NonZeroU64,
+        slots_per_epoch: NonZero<u64>,
 
         /// Epoch the parent block belongs to. Must be `None` if and only if the parent block's
         /// number is 0, as block #0 doesn't belong to any epoch.
@@ -141,24 +141,24 @@ pub enum Success {
 }
 
 /// Error that can happen during the verification.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// Number of the block to verify isn't equal to the parent block's number plus one.
     NonSequentialBlockNumber,
     /// Hash of the parent block doesn't match the hash in the header to verify.
     BadParentHash,
     /// Block header contains an unrecognized consensus engine.
-    #[display(fmt = "Block header contains an unrecognized consensus engine: {engine:?}")]
+    #[display("Block header contains an unrecognized consensus engine: {engine:?}")]
     UnknownConsensusEngine { engine: [u8; 4] },
     /// Block header contains items relevant to multiple consensus engines at the same time.
     MultipleConsensusEngines,
     /// Block header contains items that don't match the finality engine of the chain.
     FinalityEngineMismatch,
     /// Failed to verify the authenticity of the block with the AURA algorithm.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     AuraVerification(aura::VerifyError),
     /// Failed to verify the authenticity of the block with the BABE algorithm.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     BabeVerification(babe::VerifyError),
     /// Block schedules a Grandpa authorities change while another change is still in progress.
     GrandpaChangesOverlap,

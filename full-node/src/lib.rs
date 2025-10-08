@@ -18,7 +18,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 // TODO: #![deny(unused_crate_dependencies)] doesn't work because some deps are used only by the binary, figure if this can be fixed?
 
-use futures_util::{future, StreamExt as _};
+use futures_util::{StreamExt as _, future};
 use rand::RngCore as _;
 use smol::lock::Mutex;
 use smoldot::{
@@ -228,7 +228,7 @@ impl Client {
 }
 
 /// Error potentially returned by [`start`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum StartError {
     /// Failed to parse the chain specification.
     ChainSpecParse(chain_spec::ParseError),
@@ -255,7 +255,7 @@ pub enum StartError {
 }
 
 /// Error potentially returned by [`Client::relay_chain_send_json_rpc_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum RelayChainSendJsonRpcRequestError {
     /// There is no relay chain to send the JSON-RPC request to.
     NoRelayChain,

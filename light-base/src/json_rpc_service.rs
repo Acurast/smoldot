@@ -51,7 +51,7 @@ use alloc::{
     string::{String, ToString as _},
     sync::Arc,
 };
-use core::{num::NonZeroU32, pin::Pin};
+use core::{num::NonZero, pin::Pin};
 use futures_lite::StreamExt as _;
 
 /// Configuration for [`service()`].
@@ -71,7 +71,8 @@ pub struct Config<TPlat: PlatformRef> {
     /// This parameter is necessary in order to prevent users from using up too much memory within
     /// the client.
     // TODO: unused at the moment
-    pub max_pending_requests: NonZeroU32,
+    #[allow(unused)]
+    pub max_pending_requests: NonZero<u32>,
 
     /// Maximum number of active subscriptions. Any additional subscription will be immediately
     /// rejected.
@@ -79,6 +80,7 @@ pub struct Config<TPlat: PlatformRef> {
     /// This parameter is necessary in order to prevent users from using up too much memory within
     /// the client.
     // TODO: unused at the moment
+    #[allow(unused)]
     pub max_subscriptions: u32,
 
     /// Access to the network, and identifier of the chain from the point of view of the network
@@ -234,12 +236,12 @@ impl<TPlat: PlatformRef> Frontend<TPlat> {
 }
 
 /// Error potentially returned when queuing a JSON-RPC request.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum HandleRpcError {
     /// The JSON-RPC service cannot process this request, as too many requests are already being
     /// processed.
     #[display(
-        fmt = "The JSON-RPC service cannot process this request, as too many requests are already being processed."
+        "The JSON-RPC service cannot process this request, as too many requests are already being processed."
     )]
     TooManyPendingRequests {
         /// Request that was being queued.

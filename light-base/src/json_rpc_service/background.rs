@@ -32,24 +32,20 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{
-    iter, mem,
-    num::{NonZeroU32, NonZeroUsize},
-    pin::Pin,
-    time::Duration,
-};
+use core::{iter, mem, num::NonZero, pin::Pin, time::Duration};
 use futures_lite::{FutureExt as _, StreamExt as _};
 use futures_util::{future, stream};
 use rand_chacha::{
-    rand_core::{RngCore as _, SeedableRng as _},
     ChaCha20Rng,
+    rand_core::{RngCore as _, SeedableRng as _},
 };
 use smoldot::{
     header,
     informant::HashDisplay,
     json_rpc::{self, methods, parse},
-    libp2p::{multiaddr, PeerId},
+    libp2p::{PeerId, multiaddr},
     network::codec,
+    trie::{minimize_proof, proof_decode},
 };
 
 /// Configuration for a JSON-RPC service.
@@ -130,8 +126,7 @@ struct Background<TPlat: PlatformRef> {
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
     /// Tasks that are spawned by the service and running in the background.
-    background_tasks:
-        stream::FuturesUnordered<Pin<Box<dyn future::Future<Output = Event<TPlat>> + Send>>>,
+    background_tasks: stream::FuturesUnordered<Pin<Box<dyn Future<Output = Event<TPlat>> + Send>>>,
 
     /// Channel where serialized JSON-RPC requests are pulled from.
     requests_rx: Pin<Box<async_channel::Receiver<String>>>,
@@ -269,7 +264,7 @@ enum RuntimeServiceSubscription<TPlat: PlatformRef> {
 
     /// Waiting for the runtime service to start the subscription. Can potentially take a long
     /// time.
-    Pending(Pin<Box<dyn future::Future<Output = runtime_service::SubscribeAll<TPlat>> + Send>>),
+    Pending(Pin<Box<dyn Future<Output = runtime_service::SubscribeAll<TPlat>> + Send>>),
 
     /// Subscription not requested yet. Should transition to
     /// [`RuntimeServiceSubscription::Pending`] as soon as possible.
@@ -342,6 +337,9 @@ enum MultiStageRequestTy {
         keys: Vec<methods::HexString>,
     },
     StateGetMetadata,
+    StateGetReadProof {
+        keys: Vec<methods::HexString>,
+    },
     StateGetStorage {
         key: Vec<u8>,
     },
@@ -368,6 +366,10 @@ enum StorageRequestInProgress {
     StateQueryStorageAt {
         block_hash: [u8; 32],
         in_progress_results: Vec<(methods::HexString, Option<methods::HexString>)>,
+    },
+    StateGetReadProof {
+        block_hash: [u8; 32],
+        in_progress_results: Vec<Vec<u8>>,
     },
     StateGetStorage,
 }
@@ -544,19 +546,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
         responses_tx,
         multistage_requests_to_advance: VecDeque::new(),
         block_headers_cache: lru::LruCache::with_hasher(
-            NonZeroUsize::new(32).unwrap_or_else(|| unreachable!()),
+            NonZero::<usize>::new(32).unwrap_or_else(|| unreachable!()),
             Default::default(),
         ),
         best_block_hash_pending: Vec::new(),
         pending_get_finalized_head: Vec::new(),
         block_headers_pending: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()),
         block_runtimes_cache: lru::LruCache::with_hasher(
-            NonZeroUsize::new(32).unwrap_or_else(|| unreachable!()),
+            NonZero::<usize>::new(32).unwrap_or_else(|| unreachable!()),
             Default::default(),
         ),
         block_runtimes_pending: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()),
         state_get_keys_paged_cache: lru::LruCache::with_hasher(
-            NonZeroUsize::new(2).unwrap(),
+            NonZero::<usize>::new(2).unwrap(),
             util::SipHasherBuild::new({
                 let mut seed = [0; 16];
                 config.platform.fill_random_bytes(&mut seed);
@@ -715,16 +717,28 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
             WakeUpReason::IncomingJsonRpcRequest(request_json) => {
                 // New JSON-RPC request pulled from the channel.
-                let Ok((request_id_json, request_parsed)) =
-                    methods::parse_jsonrpc_client_to_server(&request_json)
-                else {
-                    // Request has failed to parse. Immediately return an answer.
-                    let _ = me
-                        .responses_tx
-                        .send(parse::build_parse_error_response())
-                        .await;
-                    continue;
-                };
+                let (request_id_json, request_parsed) =
+                    match methods::parse_jsonrpc_client_to_server(&request_json) {
+                        Ok(r) => r,
+                        Err(methods::ParseClientToServerError::JsonRpcParse(_)) => {
+                            // Request has failed to parse. Immediately return an answer.
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_parse_error_response())
+                                .await;
+                            continue;
+                        }
+                        Err(methods::ParseClientToServerError::Method { request_id, error }) => {
+                            // Invalid method or parameters. Immediately return an answer.
+                            let _ = me.responses_tx.send(error.to_json_error(request_id)).await;
+                            continue;
+                        }
+                        Err(methods::ParseClientToServerError::UnknownNotification { .. }) => {
+                            // Invalid notification-style request. As per spec, we simply
+                            // ignore them.
+                            continue;
+                        }
+                    };
 
                 // Print a warning for legacy JSON-RPC API functions.
                 match request_parsed {
@@ -1406,6 +1420,21 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         ));
                     }
 
+                    methods::MethodCall::state_getReadProof { keys, at } => {
+                        // Because this request requires asynchronous operations, we push it
+                        // to a list of "multi-stage requests" that are processed later.
+                        me.multistage_requests_to_advance.push_back((
+                            request_id_json.to_owned(),
+                            match at {
+                                Some(methods::HashHexString(block_hash)) => {
+                                    MultiStageRequestStage::BlockHashKnown { block_hash }
+                                }
+                                None => MultiStageRequestStage::BlockHashNotKnown,
+                            },
+                            MultiStageRequestTy::StateGetReadProof { keys },
+                        ));
+                    }
+
                     methods::MethodCall::state_getStorage { key, hash } => {
                         // Because this request requires asynchronous operations, we push it
                         // to a list of "multi-stage requests" that are processed later.
@@ -1808,7 +1837,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             },
                             3,
                             Duration::from_secs(20),
-                            NonZeroU32::new(2).unwrap(),
+                            NonZero::<u32>::new(2).unwrap(),
                         );
 
                         // Allocate an operation ID, update the local state, and notify the
@@ -1983,7 +2012,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         call_parameters,
                                         3,
                                         Duration::from_secs(20),
-                                        NonZeroU32::new(2).unwrap(),
+                                        NonZero::<u32>::new(2).unwrap(),
                                     )
                                     .await
                             }
@@ -2176,7 +2205,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             storage_operations.into_iter(),
                             3,
                             Duration::from_secs(20),
-                            NonZeroU32::new(2).unwrap(),
+                            NonZero::<u32>::new(2).unwrap(),
                         );
 
                         let operation_id = {
@@ -2317,7 +2346,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     subscription: runtime_service
                                         .subscribe_all(
                                             32,
-                                            NonZeroUsize::new(32).unwrap_or_else(|| unreachable!()),
+                                            NonZero::<usize>::new(32)
+                                                .unwrap_or_else(|| unreachable!()),
                                         )
                                         .await,
                                 }
@@ -2784,7 +2814,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::offchain_localStorageGet { .. }
                     | methods::MethodCall::offchain_localStorageSet { .. }
                     | methods::MethodCall::state_getPairs { .. }
-                    | methods::MethodCall::state_getReadProof { .. }
                     | methods::MethodCall::state_getStorageHash { .. }
                     | methods::MethodCall::state_getStorageSize { .. }
                     | methods::MethodCall::state_queryStorage { .. }
@@ -2931,7 +2960,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     },
                                     3,
                                     Duration::from_secs(8),
-                                    NonZeroU32::new(1).unwrap(),
+                                    NonZero::<u32>::new(1).unwrap(),
                                 )
                                 .await
                         } else {
@@ -2945,7 +2974,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     },
                                     3,
                                     Duration::from_secs(8),
-                                    NonZeroU32::new(1).unwrap(),
+                                    NonZero::<u32>::new(1).unwrap(),
                                 )
                                 .await
                         };
@@ -3050,7 +3079,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     },
                                     3,
                                     Duration::from_secs(5),
-                                    NonZeroU32::new(1).unwrap_or_else(|| unreachable!()),
+                                    NonZero::<u32>::new(1).unwrap_or_else(|| unreachable!()),
                                 );
                             let block_number_bytes = me.runtime_service.block_number_bytes();
                             Box::pin(async move {
@@ -3210,7 +3239,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     parameters_vectored,
                                     3,
                                     Duration::from_secs(5),
-                                    NonZeroU32::new(1).unwrap_or_else(|| unreachable!()),
+                                    NonZero::<u32>::new(1).unwrap_or_else(|| unreachable!()),
                                 )
                                 .await,
                         }
@@ -3268,7 +3297,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                             .into_iter(),
                                             3,
                                             Duration::from_secs(20),
-                                            NonZeroU32::new(1).unwrap(),
+                                            NonZero::<u32>::new(1).unwrap(),
                                         )
                                         .advance()
                                         .await;
@@ -3497,8 +3526,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     request_ty @ (MultiStageRequestTy::StateGetKeys { .. }
                     | MultiStageRequestTy::StateGetKeysPaged { .. }
                     | MultiStageRequestTy::StateQueryStorageAt { .. }
-                    | MultiStageRequestTy::StateGetStorage { .. }),
+                    | MultiStageRequestTy::StateGetStorage { .. }
+                    | MultiStageRequestTy::StateGetReadProof { .. }),
             } => {
+                let is_state_get_read_proof =
+                    matches!(request_ty, MultiStageRequestTy::StateGetReadProof { .. });
+
                 // A storage-related JSON-RPC function can make progress.
                 // Build and start a background task that performs the actual storage request.
                 let (request, storage_request) = match request_ty {
@@ -3528,15 +3561,27 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             ty: sync_service::StorageRequestItemTy::DescendantsHashes,
                         })),
                     ),
-                    MultiStageRequestTy::StateQueryStorageAt { keys } => (
-                        StorageRequestInProgress::StateQueryStorageAt {
-                            block_hash,
-                            in_progress_results: Vec::with_capacity(keys.len()),
+                    MultiStageRequestTy::StateQueryStorageAt { keys }
+                    | MultiStageRequestTy::StateGetReadProof { keys } => (
+                        if is_state_get_read_proof {
+                            StorageRequestInProgress::StateGetReadProof {
+                                block_hash,
+                                in_progress_results: Vec::with_capacity(keys.len()),
+                            }
+                        } else {
+                            StorageRequestInProgress::StateQueryStorageAt {
+                                block_hash,
+                                in_progress_results: Vec::with_capacity(keys.len()),
+                            }
                         },
                         either::Right(keys.into_iter().map(|key| {
                             sync_service::StorageRequestItem {
                                 key: key.0,
-                                ty: sync_service::StorageRequestItemTy::Value,
+                                ty: if is_state_get_read_proof {
+                                    sync_service::StorageRequestItemTy::MerkleProof
+                                } else {
+                                    sync_service::StorageRequestItemTy::Value
+                                },
                             }
                         })),
                     ),
@@ -3557,7 +3602,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     storage_request,
                     3,
                     Duration::from_secs(10),
-                    NonZeroU32::new(1).unwrap_or_else(|| unreachable!()),
+                    NonZero::<u32>::new(1).unwrap_or_else(|| unreachable!()),
                 );
 
                 me.background_tasks.push(Box::pin(async move {
@@ -3728,6 +3773,65 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     },
                                 ])
                                 .to_json_response(&request_id_json),
+                            )
+                            .await;
+                    }
+                    (
+                        sync_service::StorageQueryProgress::Progress {
+                            item: sync_service::StorageResultItem::MerkleProof { proof, .. },
+                            query: next,
+                            ..
+                        },
+                        StorageRequestInProgress::StateGetReadProof {
+                            block_hash,
+                            mut in_progress_results,
+                        },
+                    ) => {
+                        in_progress_results.push(proof);
+                        me.background_tasks.push(Box::pin(async move {
+                            Event::LegacyApiFunctionStorageRequestProgress {
+                                request_id_json,
+                                request: StorageRequestInProgress::StateGetReadProof {
+                                    block_hash,
+                                    in_progress_results,
+                                },
+                                progress: next.advance().await,
+                            }
+                        }));
+                    }
+                    (
+                        sync_service::StorageQueryProgress::Finished,
+                        StorageRequestInProgress::StateGetReadProof {
+                            block_hash,
+                            in_progress_results,
+                        },
+                    ) => {
+                        // Finished.
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                if let Ok(merged_proof) = minimize_proof::merge_proofs(
+                                    in_progress_results.iter().map(|v| &v[..]),
+                                ) {
+                                    let decoded =
+                                        proof_decode::decode_proof(&merged_proof).unwrap();
+                                    methods::Response::state_getReadProof(methods::ReadProof {
+                                        at: methods::HashHexString(block_hash),
+                                        proof: decoded
+                                            .map(|e| methods::HexString(e.to_owned()))
+                                            .collect(),
+                                    })
+                                    .to_json_response(&request_id_json)
+                                } else {
+                                    parse::build_error_response(
+                                        &request_id_json,
+                                        parse::ErrorResponse::ServerError(
+                                            -32000,
+                                            "A proof could not be decoded",
+                                        ),
+                                        None,
+                                    )
+                                },
                             )
                             .await;
                     }
@@ -4452,6 +4556,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             closest_descendant_merkle_value: None,
                             ..
                         } => None,
+                        // chainhead_v1 doesn't have merkle proof queries.
+                        sync_service::StorageResultItem::MerkleProof { .. } => unreachable!(),
                     };
 
                     if let Some(item) = item {
@@ -4624,7 +4730,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 let mut pinned_blocks =
                     hashbrown::HashMap::with_capacity_and_hasher(32, Default::default());
                 let mut finalized_and_pruned_lru = lru::LruCache::with_hasher(
-                    NonZeroUsize::new(32).unwrap(),
+                    NonZero::<usize>::new(32).unwrap(),
                     fnv::FnvBuildHasher::default(),
                 );
 
@@ -4715,7 +4821,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         runtime_service
                             .subscribe_all(
                                 32,
-                                NonZeroUsize::new(usize::MAX).unwrap_or_else(|| unreachable!()),
+                                NonZero::<usize>::new(usize::MAX).unwrap_or_else(|| unreachable!()),
                             )
                             .await
                     }));
@@ -4839,9 +4945,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 *current_finalized_block = finalized_hash;
                 *finalized_heads_subscriptions_stale = true;
 
-                debug_assert!(pruned_blocks
-                    .iter()
-                    .all(|hash| pinned_blocks.contains_key(hash)));
+                debug_assert!(
+                    pruned_blocks
+                        .iter()
+                        .all(|hash| pinned_blocks.contains_key(hash))
+                );
 
                 // Add the pruned and finalized blocks to the LRU cache. The least-recently used
                 // entries in the cache are unpinned and no longer tracked.
@@ -5629,7 +5737,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     }),
                                 4,
                                 Duration::from_secs(12),
-                                NonZeroU32::new(2).unwrap(),
+                                NonZero::<u32>::new(2).unwrap(),
                             )
                             .advance()
                             .await;
@@ -5897,8 +6005,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
 }
 
 fn convert_runtime_version_legacy(
-    runtime_spec: &smoldot::executor::CoreVersion,
-) -> methods::RuntimeVersion {
+    runtime_spec: &'_ smoldot::executor::CoreVersion,
+) -> methods::RuntimeVersion<'_> {
     let runtime_spec = runtime_spec.decode();
     methods::RuntimeVersion {
         spec_name: runtime_spec.spec_name.into(),
@@ -5915,7 +6023,9 @@ fn convert_runtime_version_legacy(
     }
 }
 
-fn convert_runtime_version(runtime_spec: &smoldot::executor::CoreVersion) -> methods::RuntimeSpec {
+fn convert_runtime_version(
+    runtime_spec: &'_ smoldot::executor::CoreVersion,
+) -> methods::RuntimeSpec<'_> {
     let runtime_spec = runtime_spec.decode();
     methods::RuntimeSpec {
         spec_name: runtime_spec.spec_name.into(),

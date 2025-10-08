@@ -82,12 +82,12 @@ pub(crate) fn as_ref_iter<T: Clone>(
 /// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
 /// >           the type of `E`. Use `nom::Err<nom::error::Error>`.
 pub(crate) fn nom_option_decode<'a, O, E: nom::error::ParseError<&'a [u8]>>(
-    inner_decode: impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], O, E>,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], Option<O>, E> {
+    inner_decode: impl nom::Parser<&'a [u8], Output = O, Error = E>,
+) -> impl nom::Parser<&'a [u8], Output = Option<O>, Error = E> {
     nom::branch::alt((
-        nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| None),
+        nom::combinator::map(nom::bytes::streaming::tag(&[0][..]), |_| None),
         nom::combinator::map(
-            nom::sequence::preceded(nom::bytes::streaming::tag(&[1]), inner_decode),
+            nom::sequence::preceded(nom::bytes::streaming::tag(&[1][..]), inner_decode),
             Some,
         ),
     ))
@@ -97,7 +97,10 @@ pub(crate) fn nom_option_decode<'a, O, E: nom::error::ParseError<&'a [u8]>>(
 pub(crate) fn nom_bytes_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], &'a [u8], E> {
-    nom::multi::length_data(crate::util::nom_scale_compact_usize)(bytes)
+    nom::Parser::parse(
+        &mut nom::multi::length_data(crate::util::nom_scale_compact_usize),
+        bytes,
+    )
 }
 
 /// Decodes a SCALE-encoded string.
@@ -107,20 +110,26 @@ pub(crate) fn nom_string_decode<
 >(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], &'a str, E> {
-    nom::combinator::map_res(
-        nom::multi::length_data(crate::util::nom_scale_compact_usize),
-        str::from_utf8,
-    )(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::map_res(
+            nom::multi::length_data(crate::util::nom_scale_compact_usize),
+            str::from_utf8,
+        ),
+        bytes,
+    )
 }
 
 /// Decodes a SCALE-encoded boolean.
 pub(crate) fn nom_bool_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], bool, E> {
-    nom::branch::alt((
-        nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| false),
-        nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| true),
-    ))(bytes)
+    nom::Parser::parse(
+        &mut nom::branch::alt((
+            nom::combinator::map(nom::bytes::streaming::tag(&[0][..]), |_| false),
+            nom::combinator::map(nom::bytes::streaming::tag(&[1][..]), |_| true),
+        )),
+        bytes,
+    )
 }
 
 /// Decodes into a `u64` a SCALE-encoded number whose number of bytes isn't known at compile-time.
@@ -128,7 +137,7 @@ pub(crate) fn nom_bool_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 /// Returns an error if the decoded number doesn't fit into a `u64`.
 pub(crate) fn nom_varsize_number_decode_u64<'a, E: nom::error::ParseError<&'a [u8]>>(
     num_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], u64, E> {
+) -> impl nom::Parser<&'a [u8], Output = u64, Error = E> {
     nom::combinator::map_opt(
         nom::bytes::streaming::take(num_bytes),
         move |slice: &[u8]| {
@@ -167,7 +176,7 @@ macro_rules! decode_scale_compact {
                 0b01 => {
                     if bytes.len() < 2 {
                         return Err(nom::Err::Incomplete(nom::Needed::Size(
-                            core::num::NonZeroUsize::new(2 - bytes.len()).unwrap(),
+                            core::num::NonZero::<usize>::new(2 - bytes.len()).unwrap(),
                         )));
                     }
 
@@ -188,7 +197,7 @@ macro_rules! decode_scale_compact {
                 0b10 => {
                     if bytes.len() < 4 {
                         return Err(nom::Err::Incomplete(nom::Needed::Size(
-                            core::num::NonZeroUsize::new(4 - bytes.len()).unwrap(),
+                            core::num::NonZero::<usize>::new(4 - bytes.len()).unwrap(),
                         )));
                     }
 
@@ -217,7 +226,7 @@ macro_rules! decode_scale_compact {
                             return Err(nom::Err::Error(nom::error::make_error(
                                 bytes,
                                 nom::error::ErrorKind::Satisfy,
-                            )))
+                            )));
                         }
                     };
                     Ok((&bytes[4..], value))
@@ -227,7 +236,7 @@ macro_rules! decode_scale_compact {
 
                     if bytes.len() < num_bytes + 1 {
                         return Err(nom::Err::Incomplete(nom::Needed::Size(
-                            core::num::NonZeroUsize::new(num_bytes + 1 - bytes.len()).unwrap(),
+                            core::num::NonZero::<usize>::new(num_bytes + 1 - bytes.len()).unwrap(),
                         )));
                     }
 
@@ -275,7 +284,7 @@ decode_scale_compact!(nom_scale_compact_u64, u64);
 macro_rules! encode_scale_compact {
     ($fn_name:ident, $num_ty:ty) => {
         /// Returns a buffer containing the SCALE-compact encoding of the parameter.
-        pub(crate) fn $fn_name(mut value: $num_ty) -> impl AsRef<[u8]> + Clone {
+        pub(crate) fn $fn_name(mut value: $num_ty) -> impl AsRef<[u8]> + Clone + use<> {
             const MAX_BITS: usize = 1 + (<$num_ty>::BITS as usize) / 8;
             let mut array = arrayvec::ArrayVec::<u8, MAX_BITS>::new();
 

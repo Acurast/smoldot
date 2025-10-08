@@ -23,16 +23,15 @@ use smoldot::{
     trie,
 };
 use std::{
-    future::Future,
     iter,
     pin::{self, Pin},
     sync::Arc,
 };
 
 use crate::{
-    consensus_service, database_thread,
+    LogCallback, LogLevel, consensus_service, database_thread,
     json_rpc_service::{legacy_api_subscriptions, runtime_caches_service},
-    network_service, LogCallback, LogLevel,
+    network_service,
 };
 
 pub struct Config {
@@ -833,7 +832,7 @@ pub fn spawn_requests_handler(config: Config) {
     }));
 }
 
-fn convert_runtime_version(runtime_spec: &executor::CoreVersion) -> methods::RuntimeVersion {
+fn convert_runtime_version(runtime_spec: &'_ executor::CoreVersion) -> methods::RuntimeVersion<'_> {
     let runtime_spec = runtime_spec.decode();
     methods::RuntimeVersion {
         spec_name: runtime_spec.spec_name.into(),

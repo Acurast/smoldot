@@ -77,7 +77,7 @@ pub fn build_identify_response<'a>(
         impl Iterator<Item = &'a [u8]> + 'a,
         impl Iterator<Item = &'a str> + 'a,
     >,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+) -> impl Iterator<Item = impl AsRef<[u8]>> {
     protobuf::string_tag_encode(5, config.protocol_version)
         .map(either::Left)
         .map(either::Left)
@@ -121,12 +121,12 @@ pub fn build_identify_response<'a>(
 
 /// Decodes a response to an identify request.
 pub fn decode_identify_response(
-    response_bytes: &'_ [u8],
+    response_bytes: &[u8],
 ) -> Result<
-    IdentifyResponse<'_, vec::IntoIter<&'_ [u8]>, vec::IntoIter<&'_ str>>,
+    IdentifyResponse<'_, vec::IntoIter<&[u8]>, vec::IntoIter<&str>>,
     DecodeIdentifyResponseError,
 > {
-    let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
+    let mut parser = nom::combinator::all_consuming::<_, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
             #[optional] protocol_version = 5 => protobuf::string_tag_decode,
             #[optional] agent_version = 6 => protobuf::string_tag_decode,
@@ -137,7 +137,7 @@ pub fn decode_identify_response(
         }),
     );
 
-    let decoded = match nom::Finish::finish(parser(response_bytes)) {
+    let decoded = match nom::Finish::finish(nom::Parser::parse(&mut parser, response_bytes)) {
         Ok((_, out)) => out,
         Err(_) => return Err(DecodeIdentifyResponseError::ProtobufDecode),
     };
@@ -159,11 +159,11 @@ pub fn decode_identify_response(
 }
 
 /// Error potentially returned by [`decode_identify_response`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum DecodeIdentifyResponseError {
     /// Error while decoding the Protobuf encoding.
     ProtobufDecode,
     /// Couldn't decode the public key of the remote.
-    #[display(fmt = "Failed to decode remote public key: {_0}")]
+    #[display("Failed to decode remote public key: {_0}")]
     InvalidPublicKey(FromProtobufEncodingError),
 }

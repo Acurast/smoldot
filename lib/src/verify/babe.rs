@@ -131,7 +131,7 @@
 
 use crate::{chain::chain_information, header};
 
-use core::{num::NonZeroU64, time::Duration};
+use core::{num::NonZero, time::Duration};
 
 /// Configuration for [`verify_header`].
 pub struct VerifyConfig<'a> {
@@ -154,7 +154,7 @@ pub struct VerifyConfig<'a> {
     pub now_from_unix_epoch: Duration,
 
     /// Number of slots per epoch in the Babe configuration.
-    pub slots_per_epoch: NonZeroU64,
+    pub slots_per_epoch: NonZero<u64>,
 
     /// Epoch the parent block belongs to. Must be `None` if and only if the parent block's number
     /// is 0, as block #0 doesn't belong to any epoch.
@@ -193,7 +193,7 @@ pub struct VerifySuccess {
 }
 
 /// Failure to verify a block.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum VerifyError {
     /// The seal (containing the signature of the authority) is missing from the header.
     MissingSeal,
@@ -209,7 +209,7 @@ pub enum VerifyError {
     MissingEpochChangeLog,
     /// The header contains an epoch change that would put the Babe configuration in an
     /// non-sensical state.
-    #[display(fmt = "Invalid Babe epoch change found in header: {_0}")]
+    #[display("Invalid Babe epoch change found in header: {_0}")]
     InvalidBabeParametersChange(chain_information::BabeValidityError),
     /// Authority index stored within block is out of range.
     InvalidAuthorityIndex,
@@ -235,7 +235,7 @@ pub enum VerifyError {
 }
 
 /// See [`VerifyError::InvalidChainConfiguration`]
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum InvalidChainConfiguration {
     /// The start slot of the epoch the parent block belongs to is superior to the slot where the
     /// parent block was authored.
@@ -350,7 +350,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
         // we have checked that the parent's slot number is superior or equal to the epoch
         // start slot number, and we have checked that the epoch cannot transition if the
         // slot number of the block is inferior to the next epoch start. Consequently, the
-        // substraction below cannot underflow.
+        // subtraction below cannot underflow.
         (slot_number - epoch_start_slot) / config.slots_per_epoch // `slots_per_epoch` is a `NonZero` type
     } else {
         0
@@ -558,7 +558,7 @@ macro_rules! gen_calculate_primary_threshold {
         fn $name(
             c: (u64, u64),
             authorities_weights: impl Iterator<Item = u64>,
-            authority_weight: u64, // TODO: use a NonZeroU64 once crate::header also has weights that use NonZeroU64
+            authority_weight: u64, // TODO: use a NonZero<u64> once crate::header also has weights that use NonZero<u64>
         ) -> u128 {
             // We import `libm` no matter what, so that there's no warning about an unused
             // dependency.

@@ -69,7 +69,6 @@
 // TODO: better docs
 
 #![cfg(feature = "database-sqlite")]
-#![cfg_attr(docsrs, doc(cfg(feature = "database-sqlite")))]
 
 use crate::{
     chain::chain_information,
@@ -82,7 +81,7 @@ use core::{fmt, iter};
 use parking_lot::Mutex;
 use rusqlite::OptionalExtension as _;
 
-pub use open::{open, Config, ConfigTy, DatabaseEmpty, DatabaseOpen};
+pub use open::{Config, ConfigTy, DatabaseEmpty, DatabaseOpen, open};
 
 mod open;
 mod tests;
@@ -1465,7 +1464,7 @@ impl SqliteFullDatabase {
 }
 
 impl fmt::Debug for SqliteFullDatabase {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("SqliteFullDatabase").finish()
     }
 }
@@ -1525,15 +1524,15 @@ pub enum InsertTrieNodeStorageValue<'a> {
 }
 
 /// Error while calling [`SqliteFullDatabase::insert`].
-#[derive(Debug, derive_more::Display, derive_more::From)]
+#[derive(Debug, derive_more::Display, derive_more::Error, derive_more::From)]
 pub enum InsertError {
     /// Error accessing the database.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Corrupted(CorruptedError),
     /// Block was already in the database.
     Duplicate,
     /// Error when decoding the header to import.
-    #[display(fmt = "Failed to decode header: {_0}")]
+    #[display("Failed to decode header: {_0}")]
     BadHeader(header::Error),
     /// Parent of the block to insert isn't in the database.
     MissingParent,
@@ -1542,7 +1541,7 @@ pub enum InsertError {
 }
 
 /// Error while calling [`SqliteFullDatabase::set_finalized`].
-#[derive(Debug, derive_more::Display, derive_more::From)]
+#[derive(Debug, derive_more::Display, derive_more::Error, derive_more::From)]
 pub enum SetFinalizedError {
     /// Error accessing the database.
     Corrupted(CorruptedError),
@@ -1553,7 +1552,7 @@ pub enum SetFinalizedError {
 }
 
 /// Error while accessing the storage of the finalized block.
-#[derive(Debug, derive_more::Display, derive_more::From)]
+#[derive(Debug, derive_more::Display, derive_more::Error, derive_more::From)]
 pub enum StorageAccessError {
     /// Error accessing the database.
     Corrupted(CorruptedError),
@@ -1565,7 +1564,7 @@ pub enum StorageAccessError {
 
 /// Error in the content of the database.
 // TODO: document and see if any entry is unused
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum CorruptedError {
     /// Block numbers are expected to be 64 bits.
     // TODO: remove this and use stronger schema
@@ -1584,16 +1583,16 @@ pub enum CorruptedError {
     /// couldn't be found.
     MissingBlockHeader,
     /// The header of a block in the database has failed to decode.
-    #[display(fmt = "Corrupted block header: {_0}")]
+    #[display("Corrupted block header: {_0}")]
     BlockHeaderCorrupted(header::Error),
     /// The version information about a storage entry has failed to decode.
     InvalidTrieEntryVersion,
-    #[display(fmt = "Internal error: {_0}")]
+    #[display("Internal error: {_0}")]
     Internal(InternalError),
 }
 
 /// Low-level database error, such as an error while accessing the file system.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub struct InternalError(rusqlite::Error);
 
 fn meta_get_blob(

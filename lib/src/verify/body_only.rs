@@ -37,14 +37,11 @@ pub const EXECUTE_BLOCK_FUNCTION_NAME: &str = "Core_execute_block";
 
 /// Returns a list of buffers that, when concatenated together, forms the parameter to pass to
 /// the `Core_execute_block` function in order to verify the inherents of a block.
-pub fn execute_block_parameter<'a>(
-    block_header: &'a [u8],
+pub fn execute_block_parameter(
+    block_header: &[u8],
     block_number_bytes: usize,
-    block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a,
-) -> Result<
-    impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a,
-    ExecuteBlockParameterError,
-> {
+    block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone,
+) -> Result<impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone, ExecuteBlockParameterError> {
     // Consensus engines add a seal at the end of the digest logs. This seal is guaranteed to
     // be the last item. We need to remove it before we can verify the unsealed header.
     let mut unsealed_header = match header::decode(block_header, block_number_bytes) {
@@ -62,7 +59,7 @@ pub fn execute_block_parameter<'a>(
 }
 
 /// Error potentially returned by [`execute_block_parameter`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ExecuteBlockParameterError {
     /// Header provided as parameter is invalid.
     InvalidHeader(header::Error),
@@ -78,7 +75,7 @@ pub fn check_execute_block_output(output: &[u8]) -> Result<(), ExecuteBlockOutpu
 }
 
 /// Error potentially returned by [`check_execute_block_output`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ExecuteBlockOutputError {
     /// The output is not empty.
     NotEmpty,
@@ -88,15 +85,12 @@ pub const CHECK_INHERENTS_FUNCTION_NAME: &str = "BlockBuilder_check_inherents";
 
 /// Returns a list of buffers that, when concatenated together, forms the parameter to pass to
 /// the `BlockBuilder_check_inherents` function in order to verify the inherents of a block.
-pub fn check_inherents_parameter<'a>(
-    block_header: &'a [u8],
+pub fn check_inherents_parameter(
+    block_header: &[u8],
     block_number_bytes: usize,
-    block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a,
+    block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone,
     now_from_unix_epoch: Duration,
-) -> Result<
-    impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a,
-    ExecuteBlockParameterError,
-> {
+) -> Result<impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone, ExecuteBlockParameterError> {
     // The first parameter of `BlockBuilder_check_inherents` is identical to the one of
     // `Core_execute_block`.
     let execute_block_parameter =
@@ -139,17 +133,17 @@ pub fn check_check_inherents_output(output: &[u8]) -> Result<(), InherentsOutput
     // on older runtimes that expect these values. For this reason, errors concerning `auraslot`
     // and `babeslot` are ignored.
     let parser = nom::sequence::preceded(
-        nom::sequence::tuple((crate::util::nom_bool_decode, crate::util::nom_bool_decode)),
+        (crate::util::nom_bool_decode, crate::util::nom_bool_decode),
         nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
             nom::multi::fold_many_m_n(
                 num_elems,
                 num_elems,
-                nom::sequence::tuple((
+                (
                     nom::combinator::map(nom::bytes::streaming::take(8u8), |b| {
                         <[u8; 8]>::try_from(b).unwrap()
                     }),
                     crate::util::nom_bytes_decode,
-                )),
+                ),
                 Vec::new,
                 |mut errors, (module, error)| {
                     if module != *b"auraslot" && module != *b"babeslot" {
@@ -161,7 +155,10 @@ pub fn check_check_inherents_output(output: &[u8]) -> Result<(), InherentsOutput
         }),
     );
 
-    match nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(parser)(output) {
+    match nom::Parser::parse(
+        &mut nom::combinator::all_consuming::<_, nom::error::Error<&[u8]>, _>(parser),
+        output,
+    ) {
         Err(_err) => Err(InherentsOutputError::ParseFailure),
         Ok((_, errors)) => {
             if errors.is_empty() {
@@ -174,10 +171,10 @@ pub fn check_check_inherents_output(output: &[u8]) -> Result<(), InherentsOutput
 }
 
 /// Error potentially returned by [`check_check_inherents_output`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum InherentsOutputError {
     /// Runtime has returned some errors.
-    #[display(fmt = "Runtime has returned some errors when verifying inherents: {errors:?}")]
+    #[display("Runtime has returned some errors when verifying inherents: {errors:?}")]
     Error {
         /// List of errors produced by the runtime.
         ///

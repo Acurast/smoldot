@@ -36,8 +36,8 @@
 
 use crate::{
     chain::chain_information::{
-        build, BabeEpochInformation, ChainInformation, ChainInformationConsensus,
-        ChainInformationFinality, ValidChainInformation, ValidityError,
+        BabeEpochInformation, ChainInformation, ChainInformationConsensus,
+        ChainInformationFinality, ValidChainInformation, ValidityError, build,
     },
     executor, libp2p, trie,
 };
@@ -47,7 +47,7 @@ use alloc::{
     string::{String, ToString as _},
     vec::Vec,
 };
-use core::{iter, num::NonZeroU64, ops::Bound};
+use core::{iter, num::NonZero, ops::Bound};
 
 mod light_sync_state;
 mod structs;
@@ -103,7 +103,7 @@ impl ChainSpec {
         let genesis_storage = match self.genesis_storage() {
             GenesisStorage::Items(items) => items,
             GenesisStorage::TrieRootHash(_) => {
-                return Err(FromGenesisStorageError::UnknownStorageItems)
+                return Err(FromGenesisStorageError::UnknownStorageItems);
             }
         };
 
@@ -236,7 +236,7 @@ impl ChainSpec {
     }
 
     /// Returns a list of hashes of block headers that should always be considered as invalid.
-    pub fn bad_blocks_hashes(&'_ self) -> impl Iterator<Item = &'_ [u8; 32]> + '_ {
+    pub fn bad_blocks_hashes(&self) -> impl Iterator<Item = &[u8; 32]> {
         self.client_spec
             .bad_blocks
             .as_ref()
@@ -249,7 +249,7 @@ impl ChainSpec {
     ///
     /// Bootnode addresses that have failed to be parsed are returned as well in the form of
     /// a [`Bootnode::UnrecognizedFormat`].
-    pub fn boot_nodes(&'_ self) -> impl ExactSizeIterator<Item = Bootnode<'_>> + '_ {
+    pub fn boot_nodes(&'_ self) -> impl ExactSizeIterator<Item = Bootnode<'_>> {
         // Note that we intentionally don't expose types found in the `libp2p` module in order to
         // not tie the code that parses chain specifications to the libp2p code.
         self.client_spec.boot_nodes.iter().map(|unparsed| {
@@ -273,7 +273,7 @@ impl ChainSpec {
 
     /// Returns the list of libp2p multiaddresses of the default telemetry servers of the chain.
     // TODO: more strongly typed?
-    pub fn telemetry_endpoints(&'_ self) -> impl Iterator<Item = impl AsRef<str> + '_> + '_ {
+    pub fn telemetry_endpoints(&self) -> impl Iterator<Item = impl AsRef<str>> {
         self.client_spec
             .telemetry_endpoints
             .as_ref()
@@ -311,7 +311,7 @@ impl ChainSpec {
     }
 
     /// Gives access to what is known about the storage of the genesis block of the chain.
-    pub fn genesis_storage(&self) -> GenesisStorage {
+    pub fn genesis_storage(&'_ self) -> GenesisStorage<'_> {
         match &self.client_spec.genesis {
             structs::Genesis::Raw(raw) => GenesisStorage::Items(GenesisStorageItems { raw }),
             structs::Genesis::StateRootHash(hash) => GenesisStorage::TrieRootHash(&hash.0),
@@ -417,7 +417,7 @@ impl<'a> GenesisStorageItems<'a> {
         key_before: impl Iterator<Item = u8>,
         or_equal: bool,
         prefix: impl Iterator<Item = u8>,
-    ) -> Option<impl Iterator<Item = u8> + 'a> {
+    ) -> Option<impl Iterator<Item = u8>> {
         let lower_bound = if or_equal {
             Bound::Included(structs::HexString(key_before.collect::<Vec<_>>()))
         } else {
@@ -489,7 +489,7 @@ impl LightSyncState {
             })
             .collect();
 
-        epochs.sort_unstable_by_key(|(&block_num, _)| block_num);
+        epochs.sort_unstable_by_key(|(block_num, _)| **block_num);
 
         // TODO: it seems that multiple identical epochs can be found in the list ; figure out why Substrate does that and fix it
         epochs.dedup_by_key(|(_, epoch)| epoch.epoch_index);
@@ -504,7 +504,7 @@ impl LightSyncState {
         ChainInformation {
             finalized_block_header: Box::new(self.inner.finalized_block_header.clone()),
             consensus: ChainInformationConsensus::Babe {
-                slots_per_epoch: NonZeroU64::new(next_epoch.duration)
+                slots_per_epoch: NonZero::<u64>::new(next_epoch.duration)
                     .ok_or(CheckpointToChainInformationError::InvalidBabeSlotsPerEpoch)?,
                 finalized_block_epoch_information: Some(convert_epoch(current_epoch)),
                 finalized_next_epoch_transition: convert_epoch(next_epoch),
@@ -519,7 +519,7 @@ impl LightSyncState {
                         .map(|authority| {
                             Ok(crate::header::GrandpaAuthority {
                                 public_key: authority.public_key,
-                                weight: NonZeroU64::new(authority.weight)
+                                weight: NonZero::<u64>::new(authority.weight)
                                     .ok_or(CheckpointToChainInformationError::InvalidGrandpaAuthorityWeight)?,
                             })
                         })
@@ -534,36 +534,36 @@ impl LightSyncState {
 }
 
 /// Error that can happen when parsing a chain spec JSON.
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Failed to parse chain spec")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("Failed to parse chain spec")]
 pub struct ParseError(ParseErrorInner);
 
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 enum ParseErrorInner {
     Serde(serde_json::Error),
     Other,
 }
 
 /// Error when building the chain information from the genesis storage.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum FromGenesisStorageError {
     /// Runtime couldn't be found in the storage.
     RuntimeNotFound,
     /// Error while building the chain information.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     BuildChainInformation(build::Error),
     /// Failed to decode heap pages from the storage.
-    #[display(fmt = "Failed to decode heap pages from the storage: {_0}")]
+    #[display("Failed to decode heap pages from the storage: {_0}")]
     HeapPagesDecode(executor::InvalidHeapPagesError),
     /// Error when initializing the virtual machine.
-    #[display(fmt = "Error when initializing the virtual machine: {_0}")]
+    #[display("Error when initializing the virtual machine: {_0}")]
     VmInitialization(executor::host::NewErr),
     /// Chain specification doesn't contain the list of storage items.
     UnknownStorageItems,
 }
 
 /// Error when building the chain information corresponding to a checkpoint.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum CheckpointToChainInformationError {
     /// The checkpoint corresponds to the genesis block.
     GenesisBlockCheckpoint,
@@ -572,6 +572,6 @@ pub enum CheckpointToChainInformationError {
     /// Found a Grandpa authority with a weight of 0.
     InvalidGrandpaAuthorityWeight,
     /// Information found in the checkpoint is invalid.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     InvalidData(ValidityError),
 }

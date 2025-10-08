@@ -81,9 +81,7 @@ pub enum StateRequestStart<'a> {
 // for protocol definition.
 
 /// Builds the bytes corresponding to a state request.
-pub fn build_state_request(
-    config: StateRequest<'_>,
-) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+pub fn build_state_request(config: StateRequest) -> impl Iterator<Item = impl AsRef<[u8]>> {
     let start = match config.start_key {
         StateRequestStart::MainTrie(key) => {
             either::Left(protobuf::bytes_tag_encode(2, key).map(either::Left))
@@ -111,13 +109,13 @@ pub fn build_state_request(
 ///
 /// On success, contains a Merkle proof.
 pub fn decode_state_response(response_bytes: &[u8]) -> Result<&[u8], DecodeStateResponseError> {
-    let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
+    let mut parser = nom::combinator::all_consuming::<_, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
             #[required] proof = 2 => protobuf::bytes_tag_decode,
         }),
     );
 
-    let proof = match nom::Finish::finish(parser(response_bytes)) {
+    let proof = match nom::Finish::finish(nom::Parser::parse(&mut parser, response_bytes)) {
         Ok((_, proof)) => proof.proof,
         Err(_) => return Err(DecodeStateResponseError::ProtobufDecode),
     };
@@ -126,8 +124,8 @@ pub fn decode_state_response(response_bytes: &[u8]) -> Result<&[u8], DecodeState
 }
 
 /// Error potentially returned by [`decode_state_response`].
-#[derive(Debug, derive_more::Display, Clone)]
-#[display(fmt = "Failed to decode response")]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
+#[display("Failed to decode response")]
 pub enum DecodeStateResponseError {
     /// Error while decoding the Protobuf encoding.
     ProtobufDecode,

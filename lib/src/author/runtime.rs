@@ -36,7 +36,7 @@
 //!   This must be done once per extrinsic returned by the previous step, plus once for each
 //!   transaction to push in the block.
 //! - A runtime call to `BlockBuilder_finalize_block`, which returns the newly-created unsealed
-//! block header.
+//!   block header.
 //!
 //! The body of the newly-generated block consists in the extrinsics pushed using
 //! `BlockBuilder_apply_extrinsic` (including the intrinsics).
@@ -54,7 +54,7 @@ use crate::{
 };
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::{iter, mem};
+use core::{iter, mem, slice};
 
 pub use runtime_call::{
     Nibble, StorageChanges, TrieChange, TrieChangeStorageValue, TrieEntryVersion,
@@ -126,13 +126,13 @@ pub struct Success {
 }
 
 /// Error that can happen during the block production.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// Error while executing the Wasm virtual machine.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     WasmVm(runtime_call::ErrorDetail),
     /// Error while initializing the Wasm virtual machine.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     VmInit(host::StartErr),
     /// Overflow when incrementing block height.
     BlockHeightOverflow,
@@ -143,25 +143,32 @@ pub enum Error {
     /// Error while parsing output of `BlockBuilder_apply_extrinsic`.
     BadApplyExtrinsicOutput,
     /// Applying an inherent extrinsic has returned a [`DispatchError`].
-    #[display(fmt = "Error while applying inherent extrinsic: {error}\nExtrinsic: {extrinsic:?}")]
+    #[display("Error while applying inherent extrinsic: {error}\nExtrinsic: {extrinsic:?}")]
     InherentExtrinsicDispatchError {
         /// Extrinsic that triggered the problem.
         extrinsic: Vec<u8>,
         /// Error returned by the runtime.
+        #[error(source)]
         error: DispatchError,
     },
     /// Applying an inherent extrinsic has returned a [`TransactionValidityError`].
-    #[display(fmt = "Error while applying inherent extrinsic: {error}\nExtrinsic: {extrinsic:?}")]
+    #[display("Error while applying inherent extrinsic: {error}\nExtrinsic: {extrinsic:?}")]
     InherentExtrinsicTransactionValidityError {
         /// Extrinsic that triggered the problem.
         extrinsic: Vec<u8>,
         /// Error returned by the runtime.
+        #[error(source)]
         error: TransactionValidityError,
     },
 }
 
 /// Start a block building process.
 pub fn build_block(config: Config) -> BlockBuild {
+    let consensus_digest = match config.consensus_digest_log_item {
+        ConfigPreRuntime::Aura(item) => header::DigestItem::AuraPreDigest(item),
+        ConfigPreRuntime::Babe(item) => header::DigestItem::BabePreDigest(item.into()),
+    };
+
     let init_result = runtime_call::run(runtime_call::Config {
         function_to_call: "Core_initialize_block",
         parameter: {
@@ -175,16 +182,12 @@ pub fn build_block(config: Config) -> BlockBuild {
                         return BlockBuild::Finished(Err((
                             Error::BlockHeightOverflow,
                             config.parent_runtime,
-                        )))
+                        )));
                     }
                 },
                 extrinsics_root: &[0; 32],
                 state_root: &[0; 32],
-                digest: header::DigestRef::from_slice(&[match config.consensus_digest_log_item {
-                    ConfigPreRuntime::Aura(item) => header::DigestItem::AuraPreDigest(item),
-                    ConfigPreRuntime::Babe(item) => header::DigestItem::BabePreDigest(item.into()),
-                }])
-                .unwrap(),
+                digest: header::DigestRef::from_slice(slice::from_ref(&consensus_digest)).unwrap(),
             }
             .scale_encoding(config.block_number_bytes)
         },
@@ -274,7 +277,7 @@ impl BlockBuild {
                     return BlockBuild::Finished(Err((Error::WasmVm(err.detail), err.prototype)));
                 }
                 (Inner::Runtime(runtime_call::RuntimeCall::StorageGet(inner)), _) => {
-                    return BlockBuild::StorageGet(StorageGet(inner, shared))
+                    return BlockBuild::StorageGet(StorageGet(inner, shared));
                 }
                 (
                     Inner::Runtime(runtime_call::RuntimeCall::ClosestDescendantMerkleValue(inner)),
@@ -282,13 +285,13 @@ impl BlockBuild {
                 ) => {
                     return BlockBuild::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
                         inner, shared,
-                    ))
+                    ));
                 }
                 (Inner::Runtime(runtime_call::RuntimeCall::NextKey(inner)), _) => {
-                    return BlockBuild::NextKey(NextKey(inner, shared))
+                    return BlockBuild::NextKey(NextKey(inner, shared));
                 }
                 (Inner::Runtime(runtime_call::RuntimeCall::OffchainStorageSet(inner)), _) => {
-                    return BlockBuild::OffchainStorageSet(OffchainStorageSet(inner, shared))
+                    return BlockBuild::OffchainStorageSet(OffchainStorageSet(inner, shared));
                 }
 
                 (
@@ -323,7 +326,7 @@ impl BlockBuild {
                             return BlockBuild::Finished(Err((
                                 err,
                                 success.virtual_machine.into_prototype(),
-                            )))
+                            )));
                         }
                     };
 
@@ -351,7 +354,7 @@ impl BlockBuild {
                     inner = Inner::Runtime(match init_result {
                         Ok(vm) => vm,
                         Err((err, proto)) => {
-                            return BlockBuild::Finished(Err((Error::VmInit(err), proto)))
+                            return BlockBuild::Finished(Err((Error::VmInit(err), proto)));
                         }
                     });
                 }
@@ -386,7 +389,7 @@ impl BlockBuild {
                             return BlockBuild::Finished(Err((
                                 Error::InherentExtrinsicDispatchError { extrinsic, error },
                                 success.virtual_machine.into_prototype(),
-                            )))
+                            )));
                         }
                         Ok(Err(error)) => {
                             return BlockBuild::Finished(Err((
@@ -395,13 +398,13 @@ impl BlockBuild {
                                     error,
                                 },
                                 success.virtual_machine.into_prototype(),
-                            )))
+                            )));
                         }
                         Err(err) => {
                             return BlockBuild::Finished(Err((
                                 err,
                                 success.virtual_machine.into_prototype(),
-                            )))
+                            )));
                         }
                     }
 
@@ -422,7 +425,7 @@ impl BlockBuild {
                             return BlockBuild::Finished(Err((
                                 err,
                                 success.virtual_machine.into_prototype(),
-                            )))
+                            )));
                         }
                     };
 
@@ -619,12 +622,12 @@ pub struct StorageGet(runtime_call::StorageGet, Shared);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -645,12 +648,12 @@ pub struct ClosestDescendantMerkleValue(runtime_call::ClosestDescendantMerkleVal
 impl ClosestDescendantMerkleValue {
     /// Returns the key whose closest descendant Merkle value must be passed to
     /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&self) -> impl Iterator<Item = Nibble> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -678,12 +681,12 @@ pub struct NextKey(runtime_call::NextKey, Shared);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&self) -> impl Iterator<Item = Nibble> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -701,7 +704,7 @@ impl NextKey {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn prefix(&self) -> impl Iterator<Item = Nibble> {
         self.0.prefix()
     }
 
@@ -722,14 +725,14 @@ pub struct OffchainStorageSet(runtime_call::OffchainStorageSet, Shared);
 
 impl OffchainStorageSet {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.0.key()
     }
 
     /// Returns the value to set.
     ///
     /// If `None` is returned, the key should be removed from the storage entirely.
-    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn value(&self) -> Option<impl AsRef<[u8]>> {
         self.0.value()
     }
 
@@ -749,22 +752,25 @@ impl OffchainStorageSet {
 //       containing its remaining size; this length prefix is fully part of the `Extrinsic` though.
 //       In other words, this function might succeed or fail depending on the Substrate chain.
 fn parse_inherent_extrinsics_output(output: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
-    nom::combinator::all_consuming(nom::combinator::flat_map(
-        crate::util::nom_scale_compact_usize,
-        |num_elems| {
-            nom::multi::many_m_n(
-                num_elems,
-                num_elems,
-                nom::combinator::map(
-                    nom::combinator::recognize(nom::combinator::flat_map(
-                        crate::util::nom_scale_compact_usize,
-                        nom::bytes::streaming::take,
-                    )),
-                    |v: &[u8]| v.to_vec(),
-                ),
-            )
-        },
-    ))(output)
+    nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom::combinator::flat_map(
+            crate::util::nom_scale_compact_usize,
+            |num_elems| {
+                nom::multi::many_m_n(
+                    num_elems,
+                    num_elems,
+                    nom::combinator::map(
+                        nom::combinator::recognize(nom::combinator::flat_map(
+                            crate::util::nom_scale_compact_usize,
+                            nom::bytes::streaming::take,
+                        )),
+                        |v: &[u8]| v.to_vec(),
+                    ),
+                )
+            },
+        )),
+        output,
+    )
     .map(|(_, parse_result)| parse_result)
     .map_err(|_: nom::Err<(&[u8], nom::error::ErrorKind)>| Error::BadInherentExtrinsicsOutput)
 }
@@ -773,26 +779,29 @@ fn parse_inherent_extrinsics_output(output: &[u8]) -> Result<Vec<Vec<u8>>, Error
 fn parse_apply_extrinsic_output(
     output: &[u8],
 ) -> Result<Result<Result<(), DispatchError>, TransactionValidityError>, Error> {
-    nom::combinator::all_consuming(apply_extrinsic_result)(output)
-        .map(|(_, parse_result)| parse_result)
-        .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::BadApplyExtrinsicOutput)
+    nom::Parser::parse(
+        &mut nom::combinator::all_consuming(apply_extrinsic_result),
+        output,
+    )
+    .map(|(_, parse_result)| parse_result)
+    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::BadApplyExtrinsicOutput)
 }
 
 // TODO: some parsers below are common with the tx-pool ; figure out how/whether they should be merged
 
 /// Errors that can occur while checking the validity of a transaction.
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone, PartialEq, Eq)]
 pub enum TransactionValidityError {
     /// The transaction is invalid.
-    #[display(fmt = "Transaction is invalid: {_0}")]
+    #[display("Transaction is invalid: {_0}")]
     Invalid(InvalidTransaction),
     /// Transaction validity can't be determined.
-    #[display(fmt = "Transaction validity couldn't be determined: {_0}")]
+    #[display("Transaction validity couldn't be determined: {_0}")]
     Unknown(UnknownTransaction),
 }
 
 /// An invalid transaction validity.
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone, PartialEq, Eq)]
 pub enum InvalidTransaction {
     /// The call of the transaction is not expected.
     Call,
@@ -820,8 +829,8 @@ pub enum InvalidTransaction {
     /// left in the current block.
     ExhaustsResources,
     /// Any other custom invalid validity that is not covered by this enum.
-    #[display(fmt = "Other reason (code: {_0})")]
-    Custom(u8),
+    #[display("Other reason (code: {_0})")]
+    Custom(#[error(not(source))] u8),
     /// An extrinsic with a Mandatory dispatch resulted in Error. This is indicative of either a
     /// malicious validator or a buggy `provide_inherent`. In any case, it can result in dangerously
     /// overweight blocks and therefore if found, invalidates the block.
@@ -832,26 +841,26 @@ pub enum InvalidTransaction {
 }
 
 /// An unknown transaction validity.
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone, PartialEq, Eq)]
 pub enum UnknownTransaction {
     /// Could not lookup some information that is required to validate the transaction.
     CannotLookup,
     /// No validator found for the given unsigned transaction.
     NoUnsignedValidator,
     /// Any other custom unknown validity that is not covered by this enum.
-    #[display(fmt = "Other reason (code: {_0})")]
-    Custom(u8),
+    #[display("Other reason (code: {_0})")]
+    Custom(#[error(not(source))] u8),
 }
 
 /// Reason why a dispatch call failed.
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone, PartialEq, Eq)]
 pub enum DispatchError {
     /// Failed to lookup some data.
     CannotLookup,
     /// A bad origin.
     BadOrigin,
     /// A custom error in a module.
-    #[display(fmt = "Error in module #{index}, error number #{error}")]
+    #[display("Error in module #{index}, error number #{error}")]
     Module {
         /// Module index, matching the metadata module index.
         index: u8,
@@ -863,133 +872,157 @@ pub enum DispatchError {
 fn apply_extrinsic_result(
     bytes: &[u8],
 ) -> nom::IResult<&[u8], Result<Result<(), DispatchError>, TransactionValidityError>> {
-    nom::error::context(
-        "apply extrinsic result",
-        nom::branch::alt((
-            nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::streaming::tag(&[0]), dispatch_outcome),
-                Ok,
-            ),
-            nom::combinator::map(
-                nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[1]),
-                    transaction_validity_error,
+    nom::Parser::parse(
+        &mut nom::error::context(
+            "apply extrinsic result",
+            nom::branch::alt((
+                nom::combinator::map(
+                    nom::sequence::preceded(nom::bytes::streaming::tag(&[0][..]), dispatch_outcome),
+                    Ok,
                 ),
-                Err,
-            ),
-        )),
-    )(bytes)
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::streaming::tag(&[1][..]),
+                        transaction_validity_error,
+                    ),
+                    Err,
+                ),
+            )),
+        ),
+        bytes,
+    )
 }
 
 fn dispatch_outcome(bytes: &[u8]) -> nom::IResult<&[u8], Result<(), DispatchError>> {
-    nom::error::context(
-        "dispatch outcome",
-        nom::branch::alt((
-            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| Ok(())),
-            nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::streaming::tag(&[1]), dispatch_error),
-                Err,
-            ),
-        )),
-    )(bytes)
+    nom::Parser::parse(
+        &mut nom::error::context(
+            "dispatch outcome",
+            nom::branch::alt((
+                nom::combinator::map(nom::bytes::streaming::tag(&[0][..]), |_| Ok(())),
+                nom::combinator::map(
+                    nom::sequence::preceded(nom::bytes::streaming::tag(&[1][..]), dispatch_error),
+                    Err,
+                ),
+            )),
+        ),
+        bytes,
+    )
 }
 
 fn dispatch_error(bytes: &[u8]) -> nom::IResult<&[u8], DispatchError> {
-    nom::error::context(
-        "dispatch error",
-        nom::branch::alt((
-            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
-                DispatchError::CannotLookup
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
-                DispatchError::BadOrigin
-            }),
-            nom::combinator::map(
-                nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[2]),
-                    nom::sequence::tuple((nom::number::streaming::u8, nom::number::streaming::u8)),
+    nom::Parser::parse(
+        &mut nom::error::context(
+            "dispatch error",
+            nom::branch::alt((
+                nom::combinator::map(nom::bytes::streaming::tag(&[0][..]), |_| {
+                    DispatchError::CannotLookup
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[1][..]), |_| {
+                    DispatchError::BadOrigin
+                }),
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::streaming::tag(&[2][..]),
+                        (nom::number::streaming::u8, nom::number::streaming::u8),
+                    ),
+                    |(index, error)| DispatchError::Module { index, error },
                 ),
-                |(index, error)| DispatchError::Module { index, error },
-            ),
-        )),
-    )(bytes)
+            )),
+        ),
+        bytes,
+    )
 }
 
 fn transaction_validity_error(bytes: &[u8]) -> nom::IResult<&[u8], TransactionValidityError> {
-    nom::error::context(
-        "transaction validity error",
-        nom::branch::alt((
-            nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::streaming::tag(&[0]), invalid_transaction),
-                TransactionValidityError::Invalid,
-            ),
-            nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::streaming::tag(&[1]), unknown_transaction),
-                TransactionValidityError::Unknown,
-            ),
-        )),
-    )(bytes)
+    nom::Parser::parse(
+        &mut nom::error::context(
+            "transaction validity error",
+            nom::branch::alt((
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::streaming::tag(&[0][..]),
+                        invalid_transaction,
+                    ),
+                    TransactionValidityError::Invalid,
+                ),
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::streaming::tag(&[1][..]),
+                        unknown_transaction,
+                    ),
+                    TransactionValidityError::Unknown,
+                ),
+            )),
+        ),
+        bytes,
+    )
 }
 
 fn invalid_transaction(bytes: &[u8]) -> nom::IResult<&[u8], InvalidTransaction> {
-    nom::error::context(
-        "invalid transaction",
-        nom::branch::alt((
-            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
-                InvalidTransaction::Call
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
-                InvalidTransaction::Payment
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[2]), |_| {
-                InvalidTransaction::Future
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[3]), |_| {
-                InvalidTransaction::Stale
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[4]), |_| {
-                InvalidTransaction::BadProof
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[5]), |_| {
-                InvalidTransaction::AncientBirthBlock
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[6]), |_| {
-                InvalidTransaction::ExhaustsResources
-            }),
-            nom::combinator::map(
-                nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[7]),
-                    nom::bytes::streaming::take(1u32),
+    nom::Parser::parse(
+        &mut nom::error::context(
+            "invalid transaction",
+            nom::branch::alt((
+                nom::combinator::map(nom::bytes::streaming::tag(&[0][..]), |_| {
+                    InvalidTransaction::Call
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[1][..]), |_| {
+                    InvalidTransaction::Payment
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[2][..]), |_| {
+                    InvalidTransaction::Future
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[3][..]), |_| {
+                    InvalidTransaction::Stale
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[4][..]), |_| {
+                    InvalidTransaction::BadProof
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[5][..]), |_| {
+                    InvalidTransaction::AncientBirthBlock
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[6][..]), |_| {
+                    InvalidTransaction::ExhaustsResources
+                }),
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::streaming::tag(&[7][..]),
+                        nom::bytes::streaming::take(1u32),
+                    ),
+                    |n: &[u8]| InvalidTransaction::Custom(n[0]),
                 ),
-                |n: &[u8]| InvalidTransaction::Custom(n[0]),
-            ),
-            nom::combinator::map(nom::bytes::streaming::tag(&[8]), |_| {
-                InvalidTransaction::BadMandatory
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[9]), |_| {
-                InvalidTransaction::MandatoryDispatch
-            }),
-        )),
-    )(bytes)
+                nom::combinator::map(nom::bytes::streaming::tag(&[8][..]), |_| {
+                    InvalidTransaction::BadMandatory
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[9][..]), |_| {
+                    InvalidTransaction::MandatoryDispatch
+                }),
+            )),
+        ),
+        bytes,
+    )
 }
 
 fn unknown_transaction(bytes: &[u8]) -> nom::IResult<&[u8], UnknownTransaction> {
-    nom::error::context(
-        "unknown transaction",
-        nom::branch::alt((
-            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
-                UnknownTransaction::CannotLookup
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
-                UnknownTransaction::NoUnsignedValidator
-            }),
-            nom::combinator::map(
-                nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[2]),
-                    nom::bytes::streaming::take(1u32),
+    nom::Parser::parse(
+        &mut nom::error::context(
+            "unknown transaction",
+            nom::branch::alt((
+                nom::combinator::map(nom::bytes::streaming::tag(&[0][..]), |_| {
+                    UnknownTransaction::CannotLookup
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[1][..]), |_| {
+                    UnknownTransaction::NoUnsignedValidator
+                }),
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::streaming::tag(&[2][..]),
+                        nom::bytes::streaming::take(1u32),
+                    ),
+                    |n: &[u8]| UnknownTransaction::Custom(n[0]),
                 ),
-                |n: &[u8]| UnknownTransaction::Custom(n[0]),
-            ),
-        )),
-    )(bytes)
+            )),
+        ),
+        bytes,
+    )
 }

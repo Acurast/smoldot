@@ -2,6 +2,71 @@
 
 ## Unreleased
 
+## 2.0.39 - 2025-09-15
+
+### Fixed
+
+- Fix panic when executing proofs in some situations caused by the proof analysis not producing a correct value. ([#2176](https://github.com/smol-dot/smoldot/pull/2176))
+- When smoldot panics, this will now lead to exceptions being thrown from the public API in most situations, rather than the whole JavaScript process terminating. ([#2177](https://github.com/smol-dot/smoldot/pull/2177))
+
+## 2.0.38 - 2025-09-03
+
+### Fixed
+
+- Fix panic when an invalid SR25519 signature is passed to `ext_crypto_sr25519_verify_version_2`. ([#2170](https://github.com/smol-dot/smoldot/pull/2170))
+
+## 2.0.37 - 2025-08-29
+
+### Changed
+
+- The `state_getReadProof` legacy JSON-RPC function is now properly implemented. ([#2136](https://github.com/smol-dot/smoldot/pull/2136))
+
+## 2.0.36 - 2025-06-06
+
+### Fixed
+
+- A "parse error" JSON-RPC response is no longer erroneously sent back in case of an unrecognized JSON-RPC function name or wrong parameter types. ([#2138](https://github.com/smol-dot/smoldot/pull/2138))
+
+## 2.0.35 - 2025-05-27
+
+### Changed
+
+- The handshake of the transactions notifications protocol substream now contains the "role" of the node, similar to what Substrate does and expects. ([#2130](https://github.com/smol-dot/smoldot/pull/2130))
+
+## 2.0.34 - 2024-11-24
+
+### Fixed
+
+- Fix a `RangeError` exception sometimes being thrown due the smoldot Wasm instance growing its memory at an unexpected time. ([#2047](https://github.com/smol-dot/smoldot/pull/2047))
+
+## 2.0.33 - 2024-11-19
+
+### Fixed
+
+- Fix another bug concerning incomplete Merkle proofs, similar to the one fixed in v2.0.32. ([#2039](https://github.com/smol-dot/smoldot/pull/2039), [#2041](https://github.com/smol-dot/smoldot/pull/2041))
+
+## 2.0.32 - 2024-11-18
+
+### Fixed
+
+- Fix smoldot sometimes considering some Merkle proofs as incomplete when storage nodes are being enumerated by a runtime call, and that a branch node immediately follows a storage node in lexicographic order. ([#2037](https://github.com/smol-dot/smoldot/pull/2037))
+
+## 2.0.31 - 2024-11-08
+
+### Fixed
+
+- Fix panic in transactions service when the runtime service resets after having lost track of the head of the chain. ([#2029](https://github.com/smol-dot/smoldot/pull/2029))
+
+## 2.0.30 - 2024-08-16
+
+### Added
+
+- Add `jsonRpcResponses` async iterable iterator to `Chain`, as a more convenient alternative to the `nextJsonRpcResponse` function. ([#1937](https://github.com/smol-dot/smoldot/pull/1937))
+
+### Fixed
+
+- Fix potential panic in parachain syncing code. ([#1912](https://github.com/smol-dot/smoldot/pull/1912))
+
 ## 2.0.29 - 2024-06-17
 
 ### Fixed

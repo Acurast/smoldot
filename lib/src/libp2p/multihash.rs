@@ -99,27 +99,30 @@ impl<T> AsRef<T> for Multihash<T> {
 }
 
 /// Error when turning bytes into a [`Multihash`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum FromBytesError {
     /// The multihash is invalid.
     DecodeError,
 }
 
 impl<T: AsRef<[u8]>> fmt::Debug for Multihash<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
 impl<T: AsRef<[u8]>> fmt::Display for Multihash<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let base58 = bs58::encode(self.0.as_ref()).into_string();
         write!(f, "{base58}")
     }
 }
 
 fn decode(bytes: &[u8]) -> Result<(u32, &[u8]), FromBytesError> {
-    match nom::combinator::all_consuming(multihash::<nom::error::Error<&[u8]>>)(bytes) {
+    match nom::Parser::parse(
+        &mut nom::combinator::all_consuming(multihash::<nom::error::Error<&[u8]>>),
+        bytes,
+    ) {
         Ok((_rest, multihash)) => {
             debug_assert!(_rest.is_empty());
             Ok(multihash)
@@ -131,10 +134,13 @@ fn decode(bytes: &[u8]) -> Result<(u32, &[u8]), FromBytesError> {
 fn multihash<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], (u32, &'a [u8]), E> {
-    nom::sequence::tuple((
-        nom::combinator::map_opt(crate::util::leb128::nom_leb128_usize, |c| {
-            u32::try_from(c).ok()
-        }),
-        nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-    ))(bytes)
+    nom::Parser::parse(
+        &mut (
+            nom::combinator::map_opt(crate::util::leb128::nom_leb128_usize, |c| {
+                u32::try_from(c).ok()
+            }),
+            nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
+        ),
+        bytes,
+    )
 }

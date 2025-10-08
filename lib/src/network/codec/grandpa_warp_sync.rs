@@ -70,42 +70,47 @@ pub struct GrandpaWarpSyncResponseFragment<'a> {
 }
 
 /// Error potentially returned by [`decode_grandpa_warp_sync_response`].
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Failed to decode response")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("Failed to decode response")]
 pub struct DecodeGrandpaWarpSyncResponseError;
 
 /// Decodes a SCALE-encoded GrandPa warp sync response.
 pub fn decode_grandpa_warp_sync_response(
-    encoded: &[u8],
+    encoded: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<GrandpaWarpSyncResponse, DecodeGrandpaWarpSyncResponseError> {
-    nom::combinator::all_consuming(nom::combinator::map(
-        nom::sequence::tuple((
-            decode_fragments(block_number_bytes),
-            nom::number::streaming::le_u8,
-        )),
-        |(fragments, is_finished)| GrandpaWarpSyncResponse {
-            fragments,
-            is_finished: is_finished != 0,
-        },
-    ))(encoded)
+) -> Result<GrandpaWarpSyncResponse<'_>, DecodeGrandpaWarpSyncResponseError> {
+    nom::Parser::parse(
+        &mut nom::combinator::all_consuming::<_, (&[u8], nom::error::ErrorKind), _>(
+            nom::combinator::map(
+                (
+                    decode_fragments(block_number_bytes),
+                    nom::number::streaming::le_u8,
+                ),
+                |(fragments, is_finished)| GrandpaWarpSyncResponse {
+                    fragments,
+                    is_finished: is_finished != 0,
+                },
+            ),
+        ),
+        encoded,
+    )
     .map(|(_, parse_result)| parse_result)
     .map_err(|_| DecodeGrandpaWarpSyncResponseError)
 }
 
-fn decode_fragments<'a>(
+fn decode_fragments<'a, E: nom::error::ParseError<&'a [u8]>>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], Vec<GrandpaWarpSyncResponseFragment>> {
+) -> impl nom::Parser<&'a [u8], Output = Vec<GrandpaWarpSyncResponseFragment<'a>>, Error = E> {
     nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
         nom::multi::many_m_n(num_elems, num_elems, decode_fragment(block_number_bytes))
     })
 }
 
-fn decode_fragment<'a>(
+fn decode_fragment<'a, E: nom::error::ParseError<&'a [u8]>>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], GrandpaWarpSyncResponseFragment> {
+) -> impl nom::Parser<&'a [u8], Output = GrandpaWarpSyncResponseFragment<'a>, Error = E> {
     nom::combinator::map(
-        nom::sequence::tuple((
+        (
             nom::combinator::recognize(move |s| {
                 header::decode_partial(s, block_number_bytes)
                     .map(|(a, b)| (b, a))
@@ -120,7 +125,7 @@ fn decode_fragment<'a>(
                         nom::Err::Failure(nom::error::make_error(s, nom::error::ErrorKind::Verify))
                     })
             }),
-        )),
+        ),
         move |(scale_encoded_header, scale_encoded_justification)| {
             GrandpaWarpSyncResponseFragment {
                 scale_encoded_header,

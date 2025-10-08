@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{database_thread, LogCallback};
+use crate::database_thread;
 
 use futures_channel::oneshot;
 use futures_lite::{Future, StreamExt as _};
@@ -23,7 +23,7 @@ use smol::lock::Mutex;
 use smoldot::{executor, trie};
 use std::{
     iter,
-    num::NonZeroUsize,
+    num::NonZero,
     pin::{self, Pin},
     sync::Arc,
 };
@@ -33,14 +33,11 @@ pub struct Config {
     /// Closure that spawns background tasks.
     pub tasks_executor: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
 
-    /// Function called in order to notify of something.
-    pub log_callback: Arc<dyn LogCallback + Send + Sync>,
-
     /// Database to access blocks.
     pub database: Arc<database_thread::DatabaseThread>,
 
     /// Number of entries in the cache of runtimes.
-    pub num_cache_entries: NonZeroUsize,
+    pub num_cache_entries: NonZero<usize>,
 }
 
 /// A running runtime caches service.
@@ -174,7 +171,7 @@ impl RuntimeCachesService {
 }
 
 /// Error potentially returned by [`RuntimeCachesService::get`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum GetError {
     /// Requested block couldn't be found in the database.
     UnknownBlock,

@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::super::{
-    vm::ExecHint, Config, HeapPages, HostVm, HostVmPrototype, StorageProofSizeBehavior,
+    Config, HeapPages, HostVm, HostVmPrototype, StorageProofSizeBehavior, vm::ExecHint,
 };
 use super::with_core_version_custom_sections;
 
@@ -33,7 +33,7 @@ extern "C" {
     fn ext_hashing_keccak_256_version_1(ptrsz: i64) -> i32;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn test(_param_ptr: i32, _param_sz: i32) -> i64 {
     let slice = b"hello world";
     let ptrsz = u64::from(slice.len() as u32) << 32 | u64::from(slice.as_ptr() as usize as u32);
@@ -77,7 +77,7 @@ macro_rules! gen_test {
                     fn ext_hashing_keccak_256_version_1(ptrsz: i64) -> i32;
                 }
 
-                #[no_mangle]
+                #[unsafe(no_mangle)]
                 extern "C" fn test(_param_ptr: i32, _param_sz: i32) -> i64 {
                     let slice = b"hello world";
                     let ptrsz = u64::from(slice.len() as u32) << 32 | u64::from(slice.as_ptr() as usize as u32);
@@ -298,7 +298,9 @@ gen_test!(
 gen_test!(
     ext_hashing_twox_128_version_1,
     16,
-    [104, 105, 30, 178, 52, 103, 171, 69, 199, 183, 31, 36, 197, 3, 27, 176]
+    [
+        104, 105, 30, 178, 52, 103, 171, 69, 199, 183, 31, 36, 197, 3, 27, 176
+    ]
 );
 
 gen_test!(

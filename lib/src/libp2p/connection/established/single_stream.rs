@@ -52,14 +52,14 @@
 
 use super::{
     super::{super::read_write::ReadWrite, noise, yamux},
-    substream::{self, RespondInRequestError},
     Config, Event, SubstreamId, SubstreamIdInner,
+    substream::{self, RespondInRequestError},
 };
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::{
     fmt,
-    num::{NonZeroU32, NonZeroUsize},
+    num::NonZero,
     ops::{Add, Index, IndexMut, Sub},
     time::Duration,
 };
@@ -127,7 +127,7 @@ where
     // TODO: consider exposing an API more similar to the one of substream::Substream::read_write?
     pub fn read_write(
         mut self,
-        read_write: &'_ mut ReadWrite<TNow>,
+        read_write: &mut ReadWrite<TNow>,
     ) -> Result<(SingleStream<TNow, TSubUd>, Option<Event<TSubUd>>), Error> {
         // Start any outgoing ping if necessary.
         if read_write.now >= self.inner.next_ping {
@@ -810,16 +810,16 @@ where
 }
 
 /// Error during a connection. The connection should be shut down.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// Error in the noise cipher. Data has most likely been corrupted.
-    #[display(fmt = "Noise error: {_0}")]
+    #[display("Noise error: {_0}")]
     Noise(noise::CipherError),
     /// Error while encoding noise data.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     NoiseEncrypt(noise::EncryptError),
     /// Error in the Yamux multiplexing protocol.
-    #[display(fmt = "Yamux error: {_0}")]
+    #[display("Yamux error: {_0}")]
     Yamux(yamux::Error),
 }
 
@@ -854,9 +854,9 @@ impl ConnectionPrototype {
                 randomness.fill_bytes(&mut seed);
                 seed
             },
-            max_out_data_frame_size: NonZeroU32::new(8192).unwrap(), // TODO: make configurable?
-            max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
-            max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+            max_out_data_frame_size: NonZero::<u32>::new(8192).unwrap(), // TODO: make configurable?
+            max_simultaneous_queued_pongs: NonZero::<usize>::new(4).unwrap(),
+            max_simultaneous_rst_substreams: NonZero::<usize>::new(1024).unwrap(),
         });
 
         let outgoing_pings = yamux

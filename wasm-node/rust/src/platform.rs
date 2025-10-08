@@ -19,7 +19,7 @@ use crate::{bindings, timers::Delay};
 
 use futures_lite::future::FutureExt as _;
 
-use smoldot_light::platform::{read_write, SubstreamDirection};
+use smoldot_light::platform::{SubstreamDirection, read_write};
 
 use alloc::{
     borrow::{Cow, ToOwned as _},
@@ -33,7 +33,7 @@ use async_lock::Mutex;
 use core::{
     fmt::{self, Write as _},
     future, iter, mem,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::IpAddr,
     ops, pin, str,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
     task,
@@ -69,37 +69,36 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     type StreamErrorRef<'a> = StreamError;
     type MultiStreamConnectFuture = pin::Pin<
         Box<
-            dyn future::Future<
+            dyn Future<
                     Output = smoldot_light::platform::MultiStreamWebRtcConnection<
                         Self::MultiStream,
                     >,
                 > + Send,
         >,
     >;
-    type StreamUpdateFuture<'a> = pin::Pin<Box<dyn future::Future<Output = ()> + Send + 'a>>;
+    type StreamUpdateFuture<'a> = pin::Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
     type NextSubstreamFuture<'a> = pin::Pin<
         Box<
-            dyn future::Future<
-                    Output = Option<(Self::Stream, smoldot_light::platform::SubstreamDirection)>,
-                > + Send
+            dyn Future<Output = Option<(Self::Stream, smoldot_light::platform::SubstreamDirection)>>
+                + Send
                 + 'a,
         >,
     >;
 
     fn now_from_unix_epoch(&self) -> Duration {
-        let microseconds = unsafe { bindings::unix_timestamp_us() };
+        let microseconds = bindings::unix_timestamp_us();
         Duration::from_micros(microseconds)
     }
 
     fn now(&self) -> Self::Instant {
-        let microseconds = unsafe { bindings::monotonic_clock_us() };
+        let microseconds = bindings::monotonic_clock_us();
         Duration::from_micros(microseconds)
     }
 
     fn fill_random_bytes(&self, buffer: &mut [u8]) {
         unsafe {
             bindings::random_get(
-                u32::try_from(buffer.as_mut_ptr() as usize).unwrap(),
+                u32::try_from(buffer.as_mut_ptr().addr()).unwrap(),
                 u32::try_from(buffer.len()).unwrap(),
             )
         }
@@ -113,11 +112,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         Delay::new_at_monotonic_clock(when)
     }
 
-    fn spawn_task(
-        &self,
-        task_name: Cow<str>,
-        task: impl future::Future<Output = ()> + Send + 'static,
-    ) {
+    fn spawn_task(&self, task_name: Cow<str>, task: impl Future<Output = ()> + Send + 'static) {
         // The code below processes tasks that have names.
         #[pin_project::pin_project]
         struct FutureAdapter<F> {
@@ -126,30 +121,25 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             future: F,
         }
 
-        impl<F: future::Future> future::Future for FutureAdapter<F> {
+        impl<F: Future> Future for FutureAdapter<F> {
             type Output = F::Output;
             fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
                 let this = self.project();
-                unsafe {
-                    bindings::current_task_entered(
-                        u32::try_from(this.name.as_bytes().as_ptr() as usize).unwrap(),
-                        u32::try_from(this.name.as_bytes().len()).unwrap(),
-                    )
-                }
-
-                let before_polling = unsafe { bindings::monotonic_clock_us() };
-                let out = this.future.poll(cx);
-                let poll_duration = Duration::from_micros(
-                    unsafe { bindings::monotonic_clock_us() } - before_polling,
+                bindings::current_task_entered(
+                    u32::try_from(this.name.as_bytes().as_ptr().addr()).unwrap(),
+                    u32::try_from(this.name.as_bytes().len()).unwrap(),
                 );
+
+                let before_polling = bindings::monotonic_clock_us();
+                let out = this.future.poll(cx);
+                let poll_duration =
+                    Duration::from_micros(bindings::monotonic_clock_us() - before_polling);
                 TOTAL_CPU_USAGE_US.fetch_add(
                     u64::try_from(poll_duration.as_micros()).unwrap_or(u64::MAX),
                     Ordering::Relaxed,
                 );
 
-                unsafe {
-                    bindings::current_task_exit();
-                }
+                bindings::current_task_exit();
 
                 // Print a warning if polling the task takes a long time.
                 // It has been noticed that sometimes in Firefox polling a task takes a 16ms + a
@@ -200,9 +190,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
         let (runnable, task) = async_task::spawn(task, |runnable| {
             super::TASKS_QUEUE.push(runnable);
-            unsafe {
-                bindings::advance_execution_ready();
-            }
+            bindings::advance_execution_ready();
         });
 
         task.detach();
@@ -231,15 +219,13 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         let mut key_values = key_values.peekable();
 
         if key_values.peek().is_none() {
-            unsafe {
-                bindings::log(
-                    log_level,
-                    u32::try_from(log_target.as_bytes().as_ptr() as usize).unwrap(),
-                    u32::try_from(log_target.as_bytes().len()).unwrap(),
-                    u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(),
-                    u32::try_from(message.as_bytes().len()).unwrap(),
-                )
-            }
+            bindings::log(
+                log_level,
+                u32::try_from(log_target.as_bytes().as_ptr().addr()).unwrap(),
+                u32::try_from(log_target.as_bytes().len()).unwrap(),
+                u32::try_from(message.as_bytes().as_ptr().addr()).unwrap(),
+                u32::try_from(message.as_bytes().len()).unwrap(),
+            )
         } else {
             let mut message_build = String::with_capacity(128);
             message_build.push_str(message);
@@ -254,23 +240,21 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 let _ = write!(message_build, "{}={}", key, value);
             }
 
-            unsafe {
-                bindings::log(
-                    log_level,
-                    u32::try_from(log_target.as_bytes().as_ptr() as usize).unwrap(),
-                    u32::try_from(log_target.as_bytes().len()).unwrap(),
-                    u32::try_from(message_build.as_bytes().as_ptr() as usize).unwrap(),
-                    u32::try_from(message_build.as_bytes().len()).unwrap(),
-                )
-            }
+            bindings::log(
+                log_level,
+                u32::try_from(log_target.as_bytes().as_ptr().addr()).unwrap(),
+                u32::try_from(log_target.as_bytes().len()).unwrap(),
+                u32::try_from(message_build.as_bytes().as_ptr().addr()).unwrap(),
+                u32::try_from(message_build.as_bytes().len()).unwrap(),
+            )
         }
     }
 
-    fn client_name(&self) -> Cow<str> {
+    fn client_name(&'_ self) -> Cow<'_, str> {
         env!("CARGO_PKG_NAME").into()
     }
 
-    fn client_version(&self) -> Cow<str> {
+    fn client_version(&'_ self) -> Cow<'_, str> {
         env!("CARGO_PKG_VERSION").into()
     }
 
@@ -302,7 +286,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             smoldot_light::platform::ConnectionType::WebRtcIpv6 => 17,
         };
 
-        unsafe { bindings::connection_type_supported(ty) != 0 }
+        bindings::connection_type_supported(ty) != 0
     }
 
     fn connect_stream(
@@ -320,14 +304,14 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 port,
             } => iter::once(0u8)
                 .chain(port.to_be_bytes())
-                .chain(Ipv4Addr::from(ip).to_string().bytes())
+                .chain(ip.to_string().bytes())
                 .collect(),
             smoldot_light::platform::Address::TcpIp {
                 ip: IpAddr::V6(ip),
                 port,
             } => iter::once(1u8)
                 .chain(port.to_be_bytes())
-                .chain(Ipv6Addr::from(ip).to_string().bytes())
+                .chain(ip.to_string().bytes())
                 .collect(),
             smoldot_light::platform::Address::TcpDns { hostname, port } => iter::once(2u8)
                 .chain(port.to_be_bytes())
@@ -338,14 +322,14 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 port,
             } => iter::once(4u8)
                 .chain(port.to_be_bytes())
-                .chain(Ipv4Addr::from(ip).to_string().bytes())
+                .chain(ip.to_string().bytes())
                 .collect(),
             smoldot_light::platform::Address::WebSocketIp {
                 ip: IpAddr::V6(ip),
                 port,
             } => iter::once(5u8)
                 .chain(port.to_be_bytes())
-                .chain(Ipv6Addr::from(ip).to_string().bytes())
+                .chain(ip.to_string().bytes())
                 .collect(),
             smoldot_light::platform::Address::WebSocketDns {
                 hostname,
@@ -372,13 +356,11 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             | smoldot_light::platform::Address::WebSocketDns { .. } => false,
         };
 
-        unsafe {
-            bindings::connection_new(
-                connection_id,
-                u32::try_from(encoded_address.as_ptr() as usize).unwrap(),
-                u32::try_from(encoded_address.len()).unwrap(),
-            )
-        }
+        bindings::connection_new(
+            connection_id,
+            u32::try_from(encoded_address.as_ptr().addr()).unwrap(),
+            u32::try_from(encoded_address.len()).unwrap(),
+        );
 
         let _prev_value = lock.connections.insert(
             connection_id,
@@ -431,7 +413,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             } => iter::once(16u8)
                 .chain(port.to_be_bytes())
                 .chain(remote_certificate_sha256.iter().copied())
-                .chain(Ipv4Addr::from(ip).to_string().bytes())
+                .chain(ip.to_string().bytes())
                 .collect(),
             smoldot_light::platform::MultiStreamAddress::WebRtc {
                 ip: IpAddr::V6(ip),
@@ -440,17 +422,15 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             } => iter::once(17u8)
                 .chain(port.to_be_bytes())
                 .chain(remote_certificate_sha256.iter().copied())
-                .chain(Ipv6Addr::from(ip).to_string().bytes())
+                .chain(ip.to_string().bytes())
                 .collect(),
         };
 
-        unsafe {
-            bindings::connection_new(
-                connection_id,
-                u32::try_from(encoded_address.as_ptr() as usize).unwrap(),
-                u32::try_from(encoded_address.len()).unwrap(),
-            )
-        }
+        bindings::connection_new(
+            connection_id,
+            u32::try_from(encoded_address.as_ptr().addr()).unwrap(),
+            u32::try_from(encoded_address.len()).unwrap(),
+        );
 
         let _prev_value = lock.connections.insert(
             connection_id,
@@ -580,9 +560,9 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             .inner
         {
             ConnectionInner::MultiStreamWebRtc { .. }
-            | ConnectionInner::MultiStreamUnknownHandshake { .. } => unsafe {
-                bindings::connection_stream_open(*connection_id)
-            },
+            | ConnectionInner::MultiStreamUnknownHandshake { .. } => {
+                bindings::connection_stream_open(*connection_id);
+            }
             ConnectionInner::Reset { .. } => {}
             ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
                 unreachable!()
@@ -688,7 +668,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
         Ok(ReadWriteAccess {
             read_write: read_write::ReadWrite {
-                now: unsafe { Duration::from_micros(bindings::monotonic_clock_us()) },
+                now: Duration::from_micros(bindings::monotonic_clock_us()),
                 incoming_buffer: mem::take(&mut stream.read_buffer),
                 expected_incoming_bytes: Some(0),
                 read_bytes: 0,
@@ -762,7 +742,7 @@ impl<'a> Drop for ReadWriteAccess<'a> {
 
             for buffer in &self.read_write.write_buffers {
                 io_vectors.push(bindings::StreamSendIoVector {
-                    ptr: u32::try_from(buffer.as_ptr() as usize).unwrap(),
+                    ptr: u32::try_from(buffer.as_ptr().addr()).unwrap(),
                     len: u32::try_from(buffer.len()).unwrap(),
                 });
                 total_length += buffer.len();
@@ -774,26 +754,22 @@ impl<'a> Drop for ReadWriteAccess<'a> {
             // `unwrap()` is ok as there's no way that `buffer.len()` doesn't fit in a `u64`.
             TOTAL_BYTES_SENT.fetch_add(u64::try_from(total_length).unwrap(), Ordering::Relaxed);
 
-            unsafe {
-                bindings::stream_send(
-                    self.stream.connection_id,
-                    self.stream.stream_id.unwrap_or(0),
-                    u32::try_from(io_vectors.as_ptr() as usize).unwrap(),
-                    u32::try_from(io_vectors.len()).unwrap(),
-                );
-            }
+            bindings::stream_send(
+                self.stream.connection_id,
+                self.stream.stream_id.unwrap_or(0),
+                u32::try_from(io_vectors.as_ptr().addr()).unwrap(),
+                u32::try_from(io_vectors.len()).unwrap(),
+            );
 
             self.read_write.write_buffers.clear();
         }
 
         if self.read_write.write_bytes_queueable.is_none() && !self.stream.write_closed {
             if stream_inner.reset.is_none() && self.stream.write_closable {
-                unsafe {
-                    bindings::stream_send_close(
-                        self.stream.connection_id,
-                        self.stream.stream_id.unwrap_or(0),
-                    );
-                }
+                bindings::stream_send_close(
+                    self.stream.connection_id,
+                    self.stream.stream_id.unwrap_or(0),
+                );
             }
 
             self.stream.write_closed = true;
@@ -830,9 +806,7 @@ impl Drop for StreamWrapper {
         let remove_connection = match &mut connection.inner {
             ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
                 if removed_stream.reset.is_none() {
-                    unsafe {
-                        bindings::reset_connection(self.connection_id);
-                    }
+                    bindings::reset_connection(self.connection_id);
                 }
 
                 debug_assert!(self.stream_id.is_none());
@@ -847,19 +821,12 @@ impl Drop for StreamWrapper {
                 ..
             } => {
                 if removed_stream.reset.is_none() {
-                    unsafe {
-                        bindings::connection_stream_reset(
-                            self.connection_id,
-                            self.stream_id.unwrap(),
-                        )
-                    }
+                    bindings::connection_stream_reset(self.connection_id, self.stream_id.unwrap());
                 }
                 *connection_handles_alive -= 1;
                 let remove_connection = *connection_handles_alive == 0;
                 if remove_connection {
-                    unsafe {
-                        bindings::reset_connection(self.connection_id);
-                    }
+                    bindings::reset_connection(self.connection_id);
                 }
                 remove_connection
             }
@@ -908,15 +875,13 @@ impl Drop for MultiStreamWrapper {
             lock.connections.remove(&self.0).unwrap();
         }
         if reset_connection {
-            unsafe {
-                bindings::reset_connection(self.0);
-            }
+            bindings::reset_connection(self.0);
         }
     }
 }
 
-#[derive(Debug, derive_more::Display, Clone)]
-#[display(fmt = "{message}")]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
+#[display("{message}")]
 pub(crate) struct StreamError {
     message: String,
 }
@@ -1005,14 +970,17 @@ struct Stream {
 
 pub(crate) fn connection_multi_stream_set_handshake_info(
     connection_id: u32,
-    handshake_ty: Vec<u8>,
+    handshake_ty: Box<[u8]>,
 ) {
-    let (_, local_tls_certificate_sha256) = nom::sequence::preceded(
-        nom::bytes::streaming::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
-        nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
-            <&[u8; 32]>::try_from(b).unwrap()
-        }),
-    )(&handshake_ty[..])
+    let (_, local_tls_certificate_sha256) = nom::Parser::parse(
+        &mut nom::sequence::preceded(
+            nom::bytes::streaming::tag::<_, _, nom::error::Error<&[u8]>>(&[0][..]),
+            nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
+                <&[u8; 32]>::try_from(b).unwrap()
+            }),
+        ),
+        &handshake_ty[..],
+    )
     .expect("invalid handshake type provided to connection_multi_stream_set_handshake_info");
 
     let mut lock = STATE.try_lock().unwrap();
@@ -1063,7 +1031,7 @@ pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u
     stream.something_happened.notify(usize::MAX);
 }
 
-pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8>) {
+pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Box<[u8]>) {
     let mut lock = STATE.try_lock().unwrap();
 
     let connection = lock.connections.get_mut(&connection_id).unwrap();
@@ -1118,7 +1086,7 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8
     }
 
     stream.messages_queue_total_size += message.len();
-    stream.messages_queue.push_back(message.into_boxed_slice());
+    stream.messages_queue.push_back(message);
     stream.something_happened.notify(usize::MAX);
 }
 
@@ -1162,7 +1130,7 @@ pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbo
     }
 }
 
-pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
+pub(crate) fn connection_reset(connection_id: u32, message: Box<[u8]>) {
     let message = str::from_utf8(&message)
         .unwrap_or_else(|_| panic!("non-UTF-8 message"))
         .to_owned();
@@ -1203,7 +1171,7 @@ pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
     }
 }
 
-pub(crate) fn stream_reset(connection_id: u32, stream_id: u32, message: Vec<u8>) {
+pub(crate) fn stream_reset(connection_id: u32, stream_id: u32, message: Box<[u8]>) {
     let message: String = str::from_utf8(&message)
         .unwrap_or_else(|_| panic!("non-UTF-8 message"))
         .to_owned();

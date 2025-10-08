@@ -34,7 +34,7 @@ pub struct StorageProofRequestConfig<TKeysIter> {
 /// Builds the bytes corresponding to a storage proof request.
 pub fn build_storage_proof_request<'a>(
     config: StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + 'a>,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+) -> impl Iterator<Item = impl AsRef<[u8]>> {
     protobuf::message_tag_encode(
         2,
         protobuf::bytes_tag_encode(2, config.block_hash)
@@ -66,7 +66,7 @@ pub struct CallProofRequestConfig<'a, I> {
 /// Builds the bytes corresponding to a call proof request.
 pub fn build_call_proof_request<'a>(
     config: CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a>,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+) -> impl Iterator<Item = impl AsRef<[u8]>> {
     // TODO: don't allocate here
     let parameter = config
         .parameter_vectored
@@ -107,7 +107,7 @@ pub fn decode_storage_or_call_proof_response(
 
     // TODO: while the `proof` field is correctly optional, the `response` field isn't supposed to be optional; make it `#[required]` again once https://github.com/paritytech/substrate/pull/12732 has been merged and released
 
-    let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
+    let mut parser = nom::combinator::all_consuming::<_, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
             #[optional] response = field_num => protobuf::message_tag_decode(protobuf::message_decode!{
                 #[optional] proof = 2 => protobuf::bytes_tag_decode
@@ -115,7 +115,7 @@ pub fn decode_storage_or_call_proof_response(
         }),
     );
 
-    let proof = match nom::Finish::finish(parser(response_bytes)) {
+    let proof = match nom::Finish::finish(nom::Parser::parse(&mut parser, response_bytes)) {
         Ok((_, out)) => out.response.and_then(|r| r.proof),
         Err(_) => return Err(DecodeStorageCallProofResponseError::ProtobufDecode),
     };
@@ -124,7 +124,7 @@ pub fn decode_storage_or_call_proof_response(
 }
 
 /// Error potentially returned by [`decode_storage_or_call_proof_response`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum DecodeStorageCallProofResponseError {
     /// Error while decoding the Protobuf encoding.
     ProtobufDecode,

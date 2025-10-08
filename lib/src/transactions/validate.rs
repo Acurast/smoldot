@@ -20,7 +20,7 @@
 use crate::util;
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::{iter, num::NonZeroU64};
+use core::{iter, num::NonZero};
 
 mod tests;
 
@@ -93,7 +93,7 @@ pub struct ValidTransaction {
     /// >           after a certain number of blocks. In that case, the longevity returned by the
     /// >           validation function will be at most this number of blocks. The concept of
     /// >           mortal transactions, however, is not relevant from the client's perspective.
-    pub longevity: NonZeroU64,
+    pub longevity: NonZero<u64>,
 
     /// A flag indicating whether the transaction should be propagated to other peers.
     ///
@@ -105,7 +105,7 @@ pub struct ValidTransaction {
 }
 
 /// An invalid transaction validity.
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone, PartialEq, Eq)]
 pub enum InvalidTransaction {
     /// The call of the transaction is not expected.
     Call,
@@ -133,8 +133,8 @@ pub enum InvalidTransaction {
     /// left in the current block.
     ExhaustsResources,
     /// Any other custom invalid validity that is not covered by this enum.
-    #[display(fmt = "Other reason (code: {_0})")]
-    Custom(u8),
+    #[display("Other reason (code: {_0})")]
+    Custom(#[error(not(source))] u8),
     /// An extrinsic with a Mandatory dispatch resulted in Error. This is indicative of either a
     /// malicious validator or a buggy `provide_inherent`. In any case, it can result in dangerously
     /// overweight blocks and therefore if found, invalidates the block.
@@ -145,29 +145,29 @@ pub enum InvalidTransaction {
 }
 
 /// An unknown transaction validity.
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone, PartialEq, Eq)]
 pub enum UnknownTransaction {
     /// Could not lookup some information that is required to validate the transaction.
     CannotLookup,
     /// No validator found for the given unsigned transaction.
     NoUnsignedValidator,
     /// Any other custom unknown validity that is not covered by this enum.
-    #[display(fmt = "Other reason (code: {_0})")]
-    Custom(u8),
+    #[display("Other reason (code: {_0})")]
+    Custom(#[error(not(source))] u8),
 }
 
 /// Error that can happen during the decoding.
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub struct DecodeError();
 
 /// Errors that can occur while checking the validity of a transaction.
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone, PartialEq, Eq)]
 pub enum TransactionValidityError {
     /// The transaction is invalid.
-    #[display(fmt = "Invalid transaction: {_0}")]
+    #[display("Invalid transaction: {_0}")]
     Invalid(InvalidTransaction),
     /// Transaction validity can't be determined.
-    #[display(fmt = "Transaction validity couldn't be determined: {_0}")]
+    #[display("Transaction validity couldn't be determined: {_0}")]
     Unknown(UnknownTransaction),
 }
 
@@ -175,7 +175,7 @@ pub enum TransactionValidityError {
 pub fn validate_transaction_runtime_parameters_v2<'a>(
     scale_encoded_transaction: impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a,
     source: TransactionSource,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a {
+) -> impl Iterator<Item = impl AsRef<[u8]>> + Clone {
     validate_transaction_runtime_parameters_inner(scale_encoded_transaction, source, &[])
 }
 
@@ -184,7 +184,7 @@ pub fn validate_transaction_runtime_parameters_v3<'a>(
     scale_encoded_transaction: impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a,
     source: TransactionSource,
     block_hash: &'a [u8; 32],
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a {
+) -> impl Iterator<Item = impl AsRef<[u8]>> + Clone {
     validate_transaction_runtime_parameters_inner(scale_encoded_transaction, source, block_hash)
 }
 
@@ -192,7 +192,7 @@ fn validate_transaction_runtime_parameters_inner<'a>(
     scale_encoded_transaction: impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a,
     source: TransactionSource,
     block_hash: &'a [u8],
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a {
+) -> impl Iterator<Item = impl AsRef<[u8]>> + Clone {
     // The `TaggedTransactionQueue_validate_transaction` function expects a SCALE-encoded
     // `(source, tx, block_hash)`. The encoding is performed manually in order to avoid
     // performing redundant data copies.
@@ -220,7 +220,10 @@ pub const VALIDATION_FUNCTION_NAME: &str = "TaggedTransactionQueue_validate_tran
 pub fn decode_validate_transaction_return_value(
     scale_encoded: &[u8],
 ) -> Result<Result<ValidTransaction, TransactionValidityError>, DecodeError> {
-    match nom::combinator::all_consuming(transaction_validity)(scale_encoded) {
+    match nom::Parser::parse(
+        &mut nom::combinator::all_consuming(transaction_validity),
+        scale_encoded,
+    ) {
         Ok((_, data)) => Ok(data),
         Err(_) => Err(DecodeError()),
     }
@@ -231,135 +234,162 @@ pub fn decode_validate_transaction_return_value(
 fn transaction_validity(
     bytes: &[u8],
 ) -> nom::IResult<&[u8], Result<ValidTransaction, TransactionValidityError>> {
-    nom::error::context(
-        "transaction validity",
-        nom::branch::alt((
-            nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::streaming::tag(&[0]), valid_transaction),
-                Ok,
-            ),
-            nom::combinator::map(
-                nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[1]),
-                    transaction_validity_error,
+    nom::Parser::parse(
+        &mut nom::error::context(
+            "transaction validity",
+            nom::branch::alt((
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::streaming::tag(&[0][..]),
+                        valid_transaction,
+                    ),
+                    Ok,
                 ),
-                Err,
-            ),
-        )),
-    )(bytes)
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::streaming::tag(&[1][..]),
+                        transaction_validity_error,
+                    ),
+                    Err,
+                ),
+            )),
+        ),
+        bytes,
+    )
 }
 
 fn valid_transaction(bytes: &[u8]) -> nom::IResult<&[u8], ValidTransaction> {
-    nom::error::context(
-        "valid transaction",
-        nom::combinator::map(
-            nom::sequence::tuple((
-                nom::number::streaming::le_u64,
-                tags,
-                // TODO: maybe show by strong typing the fact that the provide tags are never empty
-                nom::combinator::verify(tags, |provides: &Vec<Vec<u8>>| !provides.is_empty()),
-                nom::combinator::map_opt(nom::number::streaming::le_u64, NonZeroU64::new),
-                util::nom_bool_decode,
-            )),
-            |(priority, requires, provides, longevity, propagate)| ValidTransaction {
-                priority,
-                requires,
-                provides,
-                longevity,
-                propagate,
-            },
+    nom::Parser::parse(
+        &mut nom::error::context(
+            "valid transaction",
+            nom::combinator::map(
+                (
+                    nom::number::streaming::le_u64,
+                    tags,
+                    // TODO: maybe show by strong typing the fact that the provide tags are never empty
+                    nom::combinator::verify(tags, |provides: &Vec<Vec<u8>>| !provides.is_empty()),
+                    nom::combinator::map_opt(nom::number::streaming::le_u64, NonZero::<u64>::new),
+                    util::nom_bool_decode,
+                ),
+                |(priority, requires, provides, longevity, propagate)| ValidTransaction {
+                    priority,
+                    requires,
+                    provides,
+                    longevity,
+                    propagate,
+                },
+            ),
         ),
-    )(bytes)
+        bytes,
+    )
 }
 
 fn transaction_validity_error(bytes: &[u8]) -> nom::IResult<&[u8], TransactionValidityError> {
-    nom::error::context(
-        "transaction validity error",
-        nom::branch::alt((
-            nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::streaming::tag(&[0]), invalid_transaction),
-                TransactionValidityError::Invalid,
-            ),
-            nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::streaming::tag(&[1]), unknown_transaction),
-                TransactionValidityError::Unknown,
-            ),
-        )),
-    )(bytes)
+    nom::Parser::parse(
+        &mut nom::error::context(
+            "transaction validity error",
+            nom::branch::alt((
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::streaming::tag(&[0][..]),
+                        invalid_transaction,
+                    ),
+                    TransactionValidityError::Invalid,
+                ),
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::streaming::tag(&[1][..]),
+                        unknown_transaction,
+                    ),
+                    TransactionValidityError::Unknown,
+                ),
+            )),
+        ),
+        bytes,
+    )
 }
 
 fn invalid_transaction(bytes: &[u8]) -> nom::IResult<&[u8], InvalidTransaction> {
-    nom::error::context(
-        "invalid transaction",
-        nom::branch::alt((
-            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
-                InvalidTransaction::Call
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
-                InvalidTransaction::Payment
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[2]), |_| {
-                InvalidTransaction::Future
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[3]), |_| {
-                InvalidTransaction::Stale
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[4]), |_| {
-                InvalidTransaction::BadProof
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[5]), |_| {
-                InvalidTransaction::AncientBirthBlock
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[6]), |_| {
-                InvalidTransaction::ExhaustsResources
-            }),
-            nom::combinator::map(
-                nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[7]),
-                    nom::bytes::streaming::take(1u32),
+    nom::Parser::parse(
+        &mut nom::error::context(
+            "invalid transaction",
+            nom::branch::alt((
+                nom::combinator::map(nom::bytes::streaming::tag(&[0][..]), |_| {
+                    InvalidTransaction::Call
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[1][..]), |_| {
+                    InvalidTransaction::Payment
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[2][..]), |_| {
+                    InvalidTransaction::Future
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[3][..]), |_| {
+                    InvalidTransaction::Stale
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[4][..]), |_| {
+                    InvalidTransaction::BadProof
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[5][..]), |_| {
+                    InvalidTransaction::AncientBirthBlock
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[6][..]), |_| {
+                    InvalidTransaction::ExhaustsResources
+                }),
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::streaming::tag(&[7][..]),
+                        nom::bytes::streaming::take(1u32),
+                    ),
+                    |n: &[u8]| InvalidTransaction::Custom(n[0]),
                 ),
-                |n: &[u8]| InvalidTransaction::Custom(n[0]),
-            ),
-            nom::combinator::map(nom::bytes::streaming::tag(&[8]), |_| {
-                InvalidTransaction::BadMandatory
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[9]), |_| {
-                InvalidTransaction::MandatoryDispatch
-            }),
-        )),
-    )(bytes)
+                nom::combinator::map(nom::bytes::streaming::tag(&[8][..]), |_| {
+                    InvalidTransaction::BadMandatory
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[9][..]), |_| {
+                    InvalidTransaction::MandatoryDispatch
+                }),
+            )),
+        ),
+        bytes,
+    )
 }
 
 fn unknown_transaction(bytes: &[u8]) -> nom::IResult<&[u8], UnknownTransaction> {
-    nom::error::context(
-        "unknown transaction",
-        nom::branch::alt((
-            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
-                UnknownTransaction::CannotLookup
-            }),
-            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
-                UnknownTransaction::NoUnsignedValidator
-            }),
-            nom::combinator::map(
-                nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[2]),
-                    nom::bytes::streaming::take(1u32),
+    nom::Parser::parse(
+        &mut nom::error::context(
+            "unknown transaction",
+            nom::branch::alt((
+                nom::combinator::map(nom::bytes::streaming::tag(&[0][..]), |_| {
+                    UnknownTransaction::CannotLookup
+                }),
+                nom::combinator::map(nom::bytes::streaming::tag(&[1][..]), |_| {
+                    UnknownTransaction::NoUnsignedValidator
+                }),
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::streaming::tag(&[2][..]),
+                        nom::bytes::streaming::take(1u32),
+                    ),
+                    |n: &[u8]| UnknownTransaction::Custom(n[0]),
                 ),
-                |n: &[u8]| UnknownTransaction::Custom(n[0]),
-            ),
-        )),
-    )(bytes)
+            )),
+        ),
+        bytes,
+    )
 }
 
 fn tags(bytes: &[u8]) -> nom::IResult<&[u8], Vec<Vec<u8>>> {
-    nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-        nom::multi::many_m_n(
-            num_elems,
-            num_elems,
-            nom::combinator::map(
-                nom::multi::length_data(crate::util::nom_scale_compact_usize),
-                |tag| tag.to_owned(),
-            ),
-        )
-    })(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
+            nom::multi::many_m_n(
+                num_elems,
+                num_elems,
+                nom::combinator::map(
+                    nom::multi::length_data(crate::util::nom_scale_compact_usize),
+                    |tag| tag.to_owned(),
+                ),
+            )
+        }),
+        bytes,
+    )
 }

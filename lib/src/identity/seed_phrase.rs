@@ -92,8 +92,8 @@ pub fn decode_ed25519_private_key(phrase: &str) -> Result<Box<[u8; 32]>, ParsePr
 
 /// Turns a human-readable private key (a.k.a. a seed phrase) into a seed and a derivation path.
 pub fn parse_private_key(phrase: &str) -> Result<ParsedPrivateKey, ParsePrivateKeyError> {
-    let parse_result: Result<_, nom::Err<nom::error::Error<&str>>> =
-        nom::combinator::all_consuming(nom::sequence::tuple((
+    let parse_result: Result<_, nom::Err<nom::error::Error<&str>>> = nom::Parser::parse(
+        &mut nom::combinator::all_consuming((
             // Either BIP39 words or some hexadecimal
             nom::branch::alt((
                 // Hexadecimal. Wrapped in `either::Left`
@@ -141,7 +141,9 @@ pub fn parse_private_key(phrase: &str) -> Result<ParsedPrivateKey, ParsePrivateK
                 nom::bytes::streaming::tag("///"),
                 |s| Ok(("", s)), // Take the rest of the input after the `///`
             ))),
-        )))(phrase);
+        )),
+        phrase,
+    );
 
     match parse_result {
         Ok((_, (either::Left(seed), path, _password))) => {
@@ -182,7 +184,7 @@ pub struct ParsedPrivateKey {
 }
 
 /// Error in [`parse_private_key`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ParsePrivateKeyError {
     /// Couldn't parse the string in any meaningful way.
     InvalidFormat,
@@ -272,7 +274,7 @@ pub fn bip39_to_seed(phrase: &str, password: &str) -> Result<Box<[u8; 32]>, Bip3
 }
 
 /// Failed to decode BIP39 mnemonic phrase.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum Bip39ToSeedError {
     /// Invalid BIP39 mnemonic phrase.
     WrongMnemonic(Bip39DecodeError),
@@ -281,8 +283,9 @@ pub enum Bip39ToSeedError {
 }
 
 /// Invalid BIP39 mnemonic phrase.
-#[derive(Debug, derive_more::Display)]
-pub struct Bip39DecodeError(bip39::Error);
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+// TODO: bip39 doesn't implement the Error trait; remove not(source) at some point
+pub struct Bip39DecodeError(#[error(not(source))] bip39::Error);
 
 #[cfg(test)]
 mod tests {

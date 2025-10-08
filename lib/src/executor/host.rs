@@ -200,7 +200,7 @@ use super::{allocator, vm};
 use crate::{trie, util};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec, vec::Vec};
-use core::{fmt, hash::Hasher as _, iter, str};
+use core::{fmt, iter, str};
 use functions::HostFunction;
 
 pub mod runtime_version;
@@ -333,17 +333,17 @@ impl HostVmPrototype {
             Err(runtime_version::FindEmbeddedRuntimeVersionError::FindSections(err)) => {
                 return Err(NewErr::RuntimeVersion(
                     FindEmbeddedRuntimeVersionError::FindSections(err),
-                ))
+                ));
             }
             Err(runtime_version::FindEmbeddedRuntimeVersionError::RuntimeApisDecode(err)) => {
                 return Err(NewErr::RuntimeVersion(
                     FindEmbeddedRuntimeVersionError::RuntimeApisDecode(err),
-                ))
+                ));
             }
             Err(runtime_version::FindEmbeddedRuntimeVersionError::RuntimeVersionDecode) => {
                 return Err(NewErr::RuntimeVersion(
                     FindEmbeddedRuntimeVersionError::RuntimeVersionDecode,
-                ))
+                ));
             }
         };
 
@@ -428,7 +428,7 @@ impl HostVmPrototype {
                             match CoreVersion::from_slice(finished.value().as_ref().to_vec()) {
                                 Ok(v) => v,
                                 Err(_) => {
-                                    return Err(NewErr::CoreVersion(CoreVersionError::Decode))
+                                    return Err(NewErr::CoreVersion(CoreVersionError::Decode));
                                 }
                             };
 
@@ -444,7 +444,7 @@ impl HostVmPrototype {
                     HostVm::LogEmit(log) => vm = log.resume(),
 
                     HostVm::Error { error, .. } => {
-                        return Err(NewErr::CoreVersion(CoreVersionError::Run(error)))
+                        return Err(NewErr::CoreVersion(CoreVersionError::Run(error)));
                     }
 
                     // Getting the runtime version is a very core operation, and very few
@@ -813,7 +813,7 @@ impl ReadyToRun {
                 return HostVm::Error {
                     error: Error::Trap(err),
                     prototype: self.inner.into_prototype(),
-                }
+                };
             }
 
             Err(vm::RunErr::BadValueTy { .. }) => {
@@ -986,7 +986,7 @@ impl ReadyToRun {
                         return HostVm::Error {
                             error: Error::ParamDecodeError,
                             prototype: self.inner.into_prototype(),
-                        }
+                        };
                     }
                     // The signatures are checked at initialization and the Wasm VM ensures that
                     // the proper parameter types are provided.
@@ -1004,7 +1004,7 @@ impl ReadyToRun {
                         return HostVm::Error {
                             error: Error::ParamDecodeError,
                             prototype: self.inner.into_prototype(),
-                        }
+                        };
                     }
                     // The signatures are checked at initialization and the Wasm VM ensures that
                     // the proper parameter types are provided.
@@ -1107,9 +1107,12 @@ impl ReadyToRun {
                 let max_keys_to_remove = {
                     let input = expect_pointer_size!(1);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
-                        nom::combinator::all_consuming(util::nom_option_decode(
-                            nom::number::streaming::le_u32,
-                        ))(input.as_ref())
+                        nom::Parser::parse(
+                            &mut nom::combinator::all_consuming(util::nom_option_decode(
+                                nom::number::streaming::le_u32,
+                            )),
+                            input.as_ref(),
+                        )
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
@@ -1309,9 +1312,12 @@ impl ReadyToRun {
                 let max_keys_to_remove = {
                     let input = expect_pointer_size!(1);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
-                        nom::combinator::all_consuming(util::nom_option_decode(
-                            nom::number::streaming::le_u32,
-                        ))(input.as_ref())
+                        nom::Parser::parse(
+                            &mut nom::combinator::all_consuming(util::nom_option_decode(
+                                nom::number::streaming::le_u32,
+                            )),
+                            input.as_ref(),
+                        )
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
@@ -1356,9 +1362,12 @@ impl ReadyToRun {
                 let max_keys_to_remove = {
                     let input = expect_pointer_size!(2);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
-                        nom::combinator::all_consuming(util::nom_option_decode(
-                            nom::number::streaming::le_u32,
-                        ))(input.as_ref())
+                        nom::Parser::parse(
+                            &mut nom::combinator::all_consuming(util::nom_option_decode(
+                                nom::number::streaming::le_u32,
+                            )),
+                            input.as_ref(),
+                        )
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
@@ -1794,27 +1803,23 @@ impl ReadyToRun {
                     .alloc_write_and_return_pointer(host_fn.name(), iter::once(out.as_bytes()))
             }
             HostFunction::ext_hashing_twox_64_version_1 => {
-                let mut h0 = twox_hash::XxHash::with_seed(0);
-                {
+                let r0 = {
                     let data = expect_pointer_size!(0);
-                    h0.write(data.as_ref());
-                }
-                let r0 = h0.finish();
+                    twox_hash::XxHash64::oneshot(0, data.as_ref())
+                };
 
                 self.inner
                     .alloc_write_and_return_pointer(host_fn.name(), iter::once(&r0.to_le_bytes()))
             }
             HostFunction::ext_hashing_twox_128_version_1 => {
-                let mut h0 = twox_hash::XxHash::with_seed(0);
-                let mut h1 = twox_hash::XxHash::with_seed(1);
-                {
+                let [r0, r1] = {
                     let data = expect_pointer_size!(0);
                     let data = data.as_ref();
-                    h0.write(data);
-                    h1.write(data);
-                }
-                let r0 = h0.finish();
-                let r1 = h1.finish();
+                    [
+                        twox_hash::XxHash64::oneshot(0, data),
+                        twox_hash::XxHash64::oneshot(1, data),
+                    ]
+                };
 
                 self.inner.alloc_write_and_return_pointer(
                     host_fn.name(),
@@ -1822,22 +1827,16 @@ impl ReadyToRun {
                 )
             }
             HostFunction::ext_hashing_twox_256_version_1 => {
-                let mut h0 = twox_hash::XxHash::with_seed(0);
-                let mut h1 = twox_hash::XxHash::with_seed(1);
-                let mut h2 = twox_hash::XxHash::with_seed(2);
-                let mut h3 = twox_hash::XxHash::with_seed(3);
-                {
+                let [r0, r1, r2, r3] = {
                     let data = expect_pointer_size!(0);
                     let data = data.as_ref();
-                    h0.write(data);
-                    h1.write(data);
-                    h2.write(data);
-                    h3.write(data);
-                }
-                let r0 = h0.finish();
-                let r1 = h1.finish();
-                let r2 = h2.finish();
-                let r3 = h3.finish();
+                    [
+                        twox_hash::XxHash64::oneshot(0, data),
+                        twox_hash::XxHash64::oneshot(1, data),
+                        twox_hash::XxHash64::oneshot(2, data),
+                        twox_hash::XxHash64::oneshot(3, data),
+                    ]
+                };
 
                 self.inner.alloc_write_and_return_pointer(
                     host_fn.name(),
@@ -1994,25 +1993,28 @@ impl ReadyToRun {
                 let result = {
                     let input = expect_pointer_size!(0);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
-                        nom::combinator::all_consuming(nom::combinator::flat_map(
-                            crate::util::nom_scale_compact_usize,
-                            |num_elems| {
-                                nom::multi::many_m_n(
-                                    num_elems,
-                                    num_elems,
-                                    nom::sequence::tuple((
-                                        nom::combinator::flat_map(
-                                            crate::util::nom_scale_compact_usize,
-                                            nom::bytes::streaming::take,
+                        nom::Parser::parse(
+                            &mut nom::combinator::all_consuming(nom::combinator::flat_map(
+                                crate::util::nom_scale_compact_usize,
+                                |num_elems| {
+                                    nom::multi::many_m_n(
+                                        num_elems,
+                                        num_elems,
+                                        (
+                                            nom::combinator::flat_map(
+                                                crate::util::nom_scale_compact_usize,
+                                                nom::bytes::streaming::take,
+                                            ),
+                                            nom::combinator::flat_map(
+                                                crate::util::nom_scale_compact_usize,
+                                                nom::bytes::streaming::take,
+                                            ),
                                         ),
-                                        nom::combinator::flat_map(
-                                            crate::util::nom_scale_compact_usize,
-                                            nom::bytes::streaming::take,
-                                        ),
-                                    )),
-                                )
-                            },
-                        ))(input.as_ref())
+                                    )
+                                },
+                            )),
+                            input.as_ref(),
+                        )
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
@@ -2060,19 +2062,22 @@ impl ReadyToRun {
                 let result = {
                     let input = expect_pointer_size!(0);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
-                        nom::combinator::all_consuming(nom::combinator::flat_map(
-                            crate::util::nom_scale_compact_usize,
-                            |num_elems| {
-                                nom::multi::many_m_n(
-                                    num_elems,
-                                    num_elems,
-                                    nom::combinator::flat_map(
-                                        crate::util::nom_scale_compact_usize,
-                                        nom::bytes::streaming::take,
-                                    ),
-                                )
-                            },
-                        ))(input.as_ref())
+                        nom::Parser::parse(
+                            &mut nom::combinator::all_consuming(nom::combinator::flat_map(
+                                crate::util::nom_scale_compact_usize,
+                                |num_elems| {
+                                    nom::multi::many_m_n(
+                                        num_elems,
+                                        num_elems,
+                                        nom::combinator::flat_map(
+                                            crate::util::nom_scale_compact_usize,
+                                            nom::bytes::streaming::take,
+                                        ),
+                                    )
+                                },
+                            )),
+                            input.as_ref(),
+                        )
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
@@ -2174,7 +2179,7 @@ impl ReadyToRun {
                         return HostVm::Error {
                             error,
                             prototype: self.inner.into_prototype(),
-                        }
+                        };
                     }
                 };
 
@@ -2198,7 +2203,7 @@ impl ReadyToRun {
                         return HostVm::Error {
                             error: Error::FreeError { pointer },
                             prototype: self.inner.into_prototype(),
-                        }
+                        };
                     }
                 };
 
@@ -2311,7 +2316,7 @@ pub struct Finished {
 
 impl Finished {
     /// Returns the value the called function has returned.
-    pub fn value(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn value(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.value_ptr, self.value_size)
@@ -2356,7 +2361,7 @@ pub struct ExternalStorageGet {
 
 impl ExternalStorageGet {
     /// Returns the key whose value must be provided back with [`ExternalStorageGet::resume`].
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
@@ -2364,7 +2369,7 @@ impl ExternalStorageGet {
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
             let child_trie = self
                 .inner
@@ -2572,7 +2577,7 @@ pub struct ExternalStorageSet {
 
 impl ExternalStorageSet {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
@@ -2585,7 +2590,7 @@ impl ExternalStorageSet {
     /// implicitly be created.
     /// If [`ExternalStorageSet::value`] returns `None` and this is the last entry in the child
     /// trie, it must implicitly be destroyed.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         match &self.child_trie_ptr_size {
             Some((ptr, size)) => {
                 let child_trie = self
@@ -2602,7 +2607,7 @@ impl ExternalStorageSet {
     /// Returns the value to set.
     ///
     /// If `None` is returned, the key should be removed from the storage entirely.
-    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn value(&self) -> Option<impl AsRef<[u8]>> {
         self.value.map(|(ptr, size)| {
             self.inner
                 .vm
@@ -2682,7 +2687,7 @@ pub struct ExternalStorageAppend {
 
 impl ExternalStorageAppend {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
@@ -2695,13 +2700,13 @@ impl ExternalStorageAppend {
     ///
     /// > **Note**: At the moment, this function always returns None, as there is no host function
     /// >           that appends to a child trie storage.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         // Note that there is no equivalent of this host function for child tries.
         None::<&'static [u8]>
     }
 
     /// Returns the value to append.
-    pub fn value(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn value(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.value_ptr, self.value_size)
@@ -2750,7 +2755,7 @@ pub struct ExternalStorageClearPrefix {
 
 impl ExternalStorageClearPrefix {
     /// Returns the prefix whose keys must be removed.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&self) -> impl AsRef<[u8]> {
         if let Some((prefix_ptr, prefix_size)) = self.prefix_ptr_size {
             either::Left(
                 self.inner
@@ -2767,7 +2772,7 @@ impl ExternalStorageClearPrefix {
     ///
     /// If [`ExternalStorageClearPrefix::child_trie`] returns `Some` and all the entries of the
     /// child trie are removed, the child trie must implicitly be destroyed.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
             let child_trie = self
                 .inner
@@ -2858,7 +2863,7 @@ pub struct ExternalStorageRoot {
 
 impl ExternalStorageRoot {
     /// Returns the child trie whose root hash must be provided. `None` for the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         if let Some((ptr, size)) = self.child_trie_ptr_size {
             let child_trie = self
                 .inner
@@ -2906,7 +2911,7 @@ pub struct ExternalStorageNextKey {
 
 impl ExternalStorageNextKey {
     /// Returns the key whose following key must be returned.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
@@ -2914,7 +2919,7 @@ impl ExternalStorageNextKey {
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
             let child_trie = self
                 .inner
@@ -2998,7 +3003,7 @@ enum SignatureVerificationAlgorithm {
 
 impl SignatureVerification {
     /// Returns the message that the signature is expected to sign.
-    pub fn message(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn message(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.message_ptr, self.message_size)
@@ -3009,7 +3014,7 @@ impl SignatureVerification {
     ///
     /// > **Note**: Be aware that this signature is untrusted input and might not be part of the
     /// >           set of valid signatures.
-    pub fn signature(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn signature(&self) -> impl AsRef<[u8]> {
         let signature_size = match self.algorithm {
             SignatureVerificationAlgorithm::Ed25519 => 64,
             SignatureVerificationAlgorithm::Sr25519V1 => 64,
@@ -3028,7 +3033,7 @@ impl SignatureVerification {
     ///
     /// > **Note**: Be aware that this public key is untrusted input and might not be part of the
     /// >           set of valid public keys.
-    pub fn public_key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn public_key(&self) -> impl AsRef<[u8]> {
         let public_key_size = match self.algorithm {
             SignatureVerificationAlgorithm::Ed25519 => 32,
             SignatureVerificationAlgorithm::Sr25519V1 => 32,
@@ -3073,14 +3078,13 @@ impl SignatureVerification {
                 })
             }
             SignatureVerificationAlgorithm::Sr25519V2 => {
+                let Ok(signature) = schnorrkel::Signature::from_bytes(self.signature().as_ref())
+                else {
+                    return false;
+                };
                 schnorrkel::PublicKey::from_bytes(self.public_key().as_ref()).map_or(false, |pk| {
-                    pk.verify_simple(
-                        b"substrate",
-                        self.message().as_ref(),
-                        &schnorrkel::Signature::from_bytes(self.signature().as_ref())
-                            .unwrap_or_else(|_| unreachable!()),
-                    )
-                    .is_ok()
+                    pk.verify_simple(b"substrate", self.message().as_ref(), &signature)
+                        .is_ok()
                 })
             }
             SignatureVerificationAlgorithm::Ecdsa => {
@@ -3194,7 +3198,7 @@ pub struct CallRuntimeVersion {
 
 impl CallRuntimeVersion {
     /// Returns the Wasm code whose runtime version must be provided.
-    pub fn wasm_code(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn wasm_code(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.wasm_blob_ptr, self.wasm_blob_size)
@@ -3247,7 +3251,7 @@ pub struct ExternalOffchainIndexSet {
 
 impl ExternalOffchainIndexSet {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
@@ -3257,7 +3261,7 @@ impl ExternalOffchainIndexSet {
     /// Returns the value to set.
     ///
     /// If `None` is returned, the key should be removed from the storage entirely.
-    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn value(&self) -> Option<impl AsRef<[u8]>> {
         if let Some((ptr, size)) = self.value {
             Some(
                 self.inner
@@ -3303,7 +3307,7 @@ pub struct ExternalOffchainStorageSet {
 
 impl ExternalOffchainStorageSet {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
@@ -3313,7 +3317,7 @@ impl ExternalOffchainStorageSet {
     /// Returns the value to set.
     ///
     /// If `None` is returned, the key should be removed from the storage entirely.
-    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn value(&self) -> Option<impl AsRef<[u8]>> {
         if let Some((ptr, size)) = self.value {
             Some(
                 self.inner
@@ -3327,7 +3331,7 @@ impl ExternalOffchainStorageSet {
     }
 
     /// Returns the value the current value should be compared against. The operation is a no-op if they don't compare equal.
-    pub fn old_value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn old_value(&self) -> Option<impl AsRef<[u8]>> {
         if let Some((ptr, size)) = self.old_value {
             Some(
                 self.inner
@@ -3378,7 +3382,7 @@ pub struct ExternalOffchainStorageGet {
 
 impl ExternalOffchainStorageGet {
     /// Returns the key whose value must be loaded.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
@@ -3480,7 +3484,7 @@ pub struct OffchainSubmitTransaction {
 
 impl OffchainSubmitTransaction {
     /// Returns the SCALE-encoded transaction to submit to the chain.
-    pub fn transaction(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn transaction(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.tx_ptr, self.tx_size)
@@ -3549,7 +3553,7 @@ enum LogEmitInner {
 
 impl LogEmit {
     /// Returns the data that the runtime would like to print.
-    pub fn info(&self) -> LogEmitInfo {
+    pub fn info(&'_ self) -> LogEmitInfo<'_> {
         match self.log_entry {
             LogEmitInner::Num(n) => LogEmitInfo::Num(n),
             LogEmitInner::Utf8 { str_ptr, str_size } => LogEmitInfo::Utf8(LogEmitInfoStr {
@@ -3650,13 +3654,13 @@ impl<'a> AsRef<[u8]> for LogEmitInfoHex<'a> {
 }
 
 impl<'a> fmt::Debug for LogEmitInfoHex<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(self.as_ref(), f)
     }
 }
 
 impl<'a> fmt::Display for LogEmitInfoHex<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&hex::encode(self.as_ref()), f)
     }
 }
@@ -3677,13 +3681,13 @@ impl<'a> AsRef<str> for LogEmitInfoStr<'a> {
 }
 
 impl<'a> fmt::Debug for LogEmitInfoStr<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(self.as_ref(), f)
     }
 }
 
 impl<'a> fmt::Display for LogEmitInfoStr<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self.as_ref(), f)
     }
 }
@@ -3817,7 +3821,7 @@ impl Inner {
                 return HostVm::Error {
                     error,
                     prototype: self.into_prototype(),
-                }
+                };
             }
         };
 
@@ -3868,7 +3872,7 @@ impl Inner {
                 return HostVm::Error {
                     error,
                     prototype: self.into_prototype(),
-                }
+                };
             }
         };
 
@@ -3911,7 +3915,7 @@ impl Inner {
                 return Err(Error::OutOfMemory {
                     function: function_name,
                     requested_size: size,
-                })
+                });
             }
         };
 
@@ -3956,19 +3960,19 @@ impl Inner {
 }
 
 /// Error that can happen when initializing a VM.
-#[derive(Debug, derive_more::From, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::From, derive_more::Display, derive_more::Error, Clone)]
 pub enum NewErr {
     /// Error in the format of the runtime code.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     BadFormat(ModuleFormatError),
     /// Error while initializing the virtual machine.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     VirtualMachine(vm::NewErr),
     /// Error while finding the runtime-version-related sections in the Wasm blob.
-    #[display(fmt = "Error in runtime spec Wasm sections: {_0}")]
+    #[display("Error in runtime spec Wasm sections: {_0}")]
     RuntimeVersion(FindEmbeddedRuntimeVersionError),
     /// Error while calling `Core_version` to determine the runtime version.
-    #[display(fmt = "Error while calling Core_version: {_0}")]
+    #[display("Error while calling Core_version: {_0}")]
     CoreVersion(CoreVersionError),
     /// Couldn't find the `__heap_base` symbol in the Wasm code.
     HeapBaseNotFound,
@@ -3978,48 +3982,48 @@ pub enum NewErr {
 }
 
 /// Error while determining .
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum FindEmbeddedRuntimeVersionError {
     /// Error while finding the custom section.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     FindSections(FindEncodedEmbeddedRuntimeVersionApisError),
     /// Error while decoding the runtime version.
     RuntimeVersionDecode,
     /// Error while decoding the runtime APIs.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     RuntimeApisDecode(CoreVersionApisFromSliceErr),
 }
 
 /// Error that can happen when starting a VM.
-#[derive(Debug, Clone, derive_more::From, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::From, derive_more::Display, derive_more::Error)]
 pub enum StartErr {
     /// Error while starting the virtual machine.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     VirtualMachine(vm::StartErr),
     /// The size of the input data is too large.
     DataSizeOverflow,
 }
 
 /// Reason why the Wasm blob isn't conforming to the runtime environment.
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// Error in the Wasm code execution.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Trap(vm::Trap),
     /// Runtime has called the `ext_panic_handler_abort_on_panic_version_1` host function.
-    #[display(fmt = "Runtime has aborted: {message:?}")]
+    #[display("Runtime has aborted: {message:?}")]
     AbortOnPanic {
         /// Message generated by the runtime.
         message: String,
     },
     /// A non-`i64` value has been returned by the Wasm entry point.
-    #[display(fmt = "A non-I64 value has been returned: {actual:?}")]
+    #[display("A non-I64 value has been returned: {actual:?}")]
     BadReturnValue {
         /// Type that has actually gotten returned. `None` for "void".
         actual: Option<vm::ValueType>,
     },
     /// The pointer and size returned by the Wasm entry point function are invalid.
-    #[display(fmt = "The pointer and size returned by the function are invalid")]
+    #[display("The pointer and size returned by the function are invalid")]
     ReturnedPtrOutOfRange {
         /// Pointer that got returned.
         pointer: u32,
@@ -4031,7 +4035,7 @@ pub enum Error {
     /// Called a function that is unknown to the host.
     ///
     /// > **Note**: Can only happen if `allow_unresolved_imports` was `true`.
-    #[display(fmt = "Called unresolved function `{module_name}`:`{function}`")]
+    #[display("Called unresolved function `{module_name}`:`{function}`")]
     UnresolvedFunctionCalled {
         /// Name of the function that was unresolved.
         function: String,
@@ -4043,7 +4047,7 @@ pub enum Error {
     /// One parameter is expected to point to a buffer, but the pointer is out
     /// of range of the memory of the Wasm VM.
     #[display(
-        fmt = "Bad pointer for parameter of index {param_num} of {function}: 0x{pointer:x}, \
+        "Bad pointer for parameter of index {param_num} of {function}: 0x{pointer:x}, \
         len = 0x{length:x}"
     )]
     ParamOutOfRange {
@@ -4061,25 +4065,26 @@ pub enum Error {
     },
     /// One parameter is expected to point to a UTF-8 string, but the buffer
     /// isn't valid UTF-8.
-    #[display(fmt = "UTF-8 error for parameter of index {param_num} of {function}: {error}")]
+    #[display("UTF-8 error for parameter of index {param_num} of {function}: {error}")]
     Utf8Error {
         /// Name of the function being called where a type mismatch happens.
         function: &'static str,
         /// Index of the invalid parameter. The first parameter has index 0.
         param_num: usize,
         /// Decoding error that happened.
+        #[error(source)]
         error: core::str::Utf8Error,
     },
     /// Called `ext_storage_rollback_transaction_version_1` or
     /// `ext_storage_commit_transaction_version_1` but no transaction was in progress.
-    #[display(fmt = "Attempted to end a transaction while none is in progress")]
+    #[display("Attempted to end a transaction while none is in progress")]
     NoActiveTransaction,
     /// Execution has finished while a transaction started with
     /// `ext_storage_start_transaction_version_1` was still in progress.
-    #[display(fmt = "Execution returned with a pending storage transaction")]
+    #[display("Execution returned with a pending storage transaction")]
     FinishedWithPendingTransaction,
     /// Error when allocating memory for a return type.
-    #[display(fmt = "Out of memory allocating 0x{requested_size:x} bytes during {function}")]
+    #[display("Out of memory allocating 0x{requested_size:x} bytes during {function}")]
     OutOfMemory {
         /// Name of the function being called.
         function: &'static str,
@@ -4087,7 +4092,7 @@ pub enum Error {
         requested_size: u32,
     },
     /// Called `ext_allocator_free_version_1` with an invalid pointer.
-    #[display(fmt = "Bad pointer passed to ext_allocator_free_version_1: 0x{pointer:x}")]
+    #[display("Bad pointer passed to ext_allocator_free_version_1: 0x{pointer:x}")]
     FreeError {
         /// Pointer that was expected to be freed.
         pointer: u32,
@@ -4095,7 +4100,7 @@ pub enum Error {
     /// Mismatch between the state trie version provided as parameter and the state trie version
     /// found in the runtime specification.
     #[display(
-        fmt = "Mismatch between the state trie version provided as parameter ({parameter:?}) and \
+        "Mismatch between the state trie version provided as parameter ({parameter:?}) and \
         the state trie version found in the runtime specification ({specification:?})."
     )]
     StateVersionMismatch {
@@ -4106,8 +4111,10 @@ pub enum Error {
     },
     /// Called `ext_default_child_storage_root_version_1` or
     /// `ext_default_child_storage_root_version_2` on a child trie that doesn't exist.
-    #[display(fmt = "Called `ext_default_child_storage_root_version_1` or
-        `ext_default_child_storage_root_version_2` on a child trie that doesn't exist.")]
+    #[display(
+        "Called `ext_default_child_storage_root_version_1` or
+        `ext_default_child_storage_root_version_2` on a child trie that doesn't exist."
+    )]
     ChildStorageRootTrieDoesntExist,
     /// Runtime has tried to perform a signature batch verification before initiating a batch
     /// verification.
@@ -4119,7 +4126,7 @@ pub enum Error {
     NoBatchVerify,
     /// The host function isn't implemented.
     // TODO: this variant should eventually disappear as all functions are implemented
-    #[display(fmt = "Host function not implemented: {function}")]
+    #[display("Host function not implemented: {function}")]
     HostFunctionNotImplemented {
         /// Name of the function being called.
         function: &'static str,
@@ -4144,7 +4151,7 @@ enum MemAccessVm<'a> {
 impl<'a> allocator::Memory for MemAccess<'a> {
     fn read_le_u64(&self, ptr: u32) -> Result<u64, allocator::Error> {
         if (ptr + 8) > u32::from(self.memory_total_pages) * 64 * 1024 {
-            return Err(allocator::Error::Other("out of bounds access"));
+            return Err(allocator::Error::Other);
         }
 
         // Note that this function (`read_le_u64`) really should take ̀`&mut self` but that is
@@ -4215,7 +4222,7 @@ impl<'a> allocator::Memory for MemAccess<'a> {
 
     fn write_le_u64(&mut self, ptr: u32, val: u64) -> Result<(), allocator::Error> {
         if (ptr + 8) > u32::from(self.memory_total_pages) * 64 * 1024 {
-            return Err(allocator::Error::Other("out of bounds access"));
+            return Err(allocator::Error::Other);
         }
 
         let bytes = val.to_le_bytes();

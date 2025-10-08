@@ -42,7 +42,7 @@
 
 use crate::{
     log,
-    platform::{self, address_parse, PlatformRef},
+    platform::{self, PlatformRef, address_parse},
 };
 
 use alloc::{
@@ -54,10 +54,10 @@ use alloc::{
     sync::Arc,
     vec::{self, Vec},
 };
-use core::{cmp, mem, num::NonZeroUsize, pin::Pin, time::Duration};
+use core::{cmp, mem, num::NonZero, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream, StreamExt as _};
+use futures_util::{StreamExt as _, future, stream};
 use hashbrown::{HashMap, HashSet};
 use rand::seq::IteratorRandom as _;
 use rand_chacha::rand_core::SeedableRng as _;
@@ -245,7 +245,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     log_name: config.log_name,
                     block_number_bytes: config.block_number_bytes,
                     num_out_slots: config.num_out_slots,
-                    num_references: NonZeroUsize::new(1).unwrap(),
+                    num_references: NonZero::<usize>::new(1).unwrap(),
                     next_discovery_period: Duration::from_secs(2),
                     next_discovery_when: self.platform.now(),
                 },
@@ -607,46 +607,46 @@ pub enum Event {
 }
 
 /// Error returned by [`NetworkServiceChain::blocks_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum BlocksRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(service::BlocksRequestError),
 }
 
 /// Error returned by [`NetworkServiceChain::grandpa_warp_sync_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum WarpSyncRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(service::GrandpaWarpSyncRequestError),
 }
 
 /// Error returned by [`NetworkServiceChain::storage_proof_request`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum StorageProofRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Storage proof request is too large and can't be sent.
     RequestTooLarge,
     /// Error during the request.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(service::StorageProofRequestError),
 }
 
 /// Error returned by [`NetworkServiceChain::call_proof_request`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum CallProofRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Call proof request is too large and can't be sent.
     RequestTooLarge,
     /// Error during the request.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(service::CallProofRequestError),
 }
 
@@ -798,7 +798,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
     // TODO: sort by ChainId instead of using a Vec?
     event_senders: either::Either<
         Vec<(ChainId, async_channel::Sender<Event>)>,
-        Pin<Box<dyn future::Future<Output = Vec<(ChainId, async_channel::Sender<Event>)>> + Send>>,
+        Pin<Box<dyn Future<Output = Vec<(ChainId, async_channel::Sender<Event>)>> + Send>>,
     >,
 
     /// Whenever [`NetworkServiceChain::subscribe`] is called, the new sender is added to this list.
@@ -842,7 +842,7 @@ struct Chain<TPlat: PlatformRef> {
     log_name: String,
 
     // TODO: this field is a hack due to the fact that `add_chain` can't be `async`; should eventually be fixed after a lib.rs refactor
-    num_references: NonZeroUsize,
+    num_references: NonZero<usize>,
 
     /// See [`ConfigChain::block_number_bytes`].
     // TODO: redundant with ChainNetwork? since we might not need to know this in the future i'm reluctant to add a getter to ChainNetwork
@@ -974,7 +974,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                     break 'search WakeUpReason::CanAssignSlot(
                                         peer_id.clone(),
                                         chain_id,
-                                    )
+                                    );
                                 }
                                 basic_peering_strategy::AssignablePeer::AllPeersBanned {
                                     next_unban,
@@ -1167,7 +1167,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::MessageForChain(chain_id, ToBackgroundChain::RemoveChain) => {
                 if let Some(new_ref) =
-                    NonZeroUsize::new(task.network[chain_id].num_references.get() - 1)
+                    NonZero::<usize>::new(task.network[chain_id].num_references.get() - 1)
                 {
                     task.network[chain_id].num_references = new_ref;
                     continue;

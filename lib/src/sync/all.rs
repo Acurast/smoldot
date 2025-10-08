@@ -40,13 +40,7 @@ use crate::{
 };
 
 use alloc::{borrow::Cow, vec::Vec};
-use core::{
-    iter,
-    marker::PhantomData,
-    num::{NonZeroU32, NonZeroU64},
-    ops,
-    time::Duration,
-};
+use core::{iter, marker::PhantomData, num::NonZero, ops, time::Duration};
 
 pub use crate::executor::vm::ExecHint;
 pub use blocks_tree::{CommitVerifyError, JustificationVerifyError};
@@ -101,7 +95,7 @@ pub struct Config {
     /// Maximum number of simultaneous pending requests made towards the same block.
     ///
     /// See [`all_forks::Config::max_requests_per_block`] for more information.
-    pub max_requests_per_block: NonZeroU32,
+    pub max_requests_per_block: NonZero<u32>,
 
     /// Number of blocks to download ahead of the best verified block.
     ///
@@ -112,7 +106,7 @@ pub struct Config {
     ///
     /// The ideal value here depends on the speed of blocks verification speed and latency of
     /// block requests.
-    pub download_ahead_blocks: NonZeroU32,
+    pub download_ahead_blocks: NonZero<u32>,
 
     /// If true, the body of a block is downloaded (if necessary) before a
     /// [`ProcessOne::VerifyBlock`] is generated.
@@ -241,7 +235,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
     /// Builds a [`chain_information::ChainInformationRef`] struct corresponding to the current
     /// latest finalized block. Can later be used to reconstruct a chain.
-    pub fn as_chain_information(&self) -> chain_information::ValidChainInformationRef {
+    pub fn as_chain_information(&'_ self) -> chain_information::ValidChainInformationRef<'_> {
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
         };
@@ -250,7 +244,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     }
 
     /// Returns the current status of the syncing.
-    pub fn status(&self) -> Status<TSrc> {
+    pub fn status(&'_ self) -> Status<'_, TSrc> {
         // TODO:
         Status::Sync
         /*match &self.inner {
@@ -350,13 +344,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     }
 
     /// Returns consensus information about the current best block of the chain.
-    pub fn best_block_consensus(&self) -> chain_information::ChainInformationConsensusRef {
+    pub fn best_block_consensus(&'_ self) -> chain_information::ChainInformationConsensusRef<'_> {
         todo!() // TODO:
     }
 
     /// Returns the header of all known non-finalized blocks in the chain without any specific
     /// order.
-    pub fn non_finalized_blocks_unordered(&self) -> impl Iterator<Item = header::HeaderRef> {
+    pub fn non_finalized_blocks_unordered(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> {
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
         };
@@ -368,7 +362,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ///
     /// The returned items are guaranteed to be in an order in which the parents are found before
     /// their children.
-    pub fn non_finalized_blocks_ancestry_order(&self) -> impl Iterator<Item = header::HeaderRef> {
+    pub fn non_finalized_blocks_ancestry_order(
+        &'_ self,
+    ) -> impl Iterator<Item = header::HeaderRef<'_>> {
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
         };
@@ -402,10 +398,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// This function call doesn't modify anything but returns an object that allows actually
     /// inserting the source.
     pub fn prepare_add_source(
-        &mut self,
+        &'_ mut self,
         best_block_number: u64,
         best_block_hash: [u8; 32],
-    ) -> AddSource<TRq, TSrc, TBl> {
+    ) -> AddSource<'_, TRq, TSrc, TBl> {
         match self
             .all_forks
             .as_mut()
@@ -488,7 +484,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     }
 
     /// Returns the list of sources in this state machine.
-    pub fn sources(&'_ self) -> impl Iterator<Item = SourceId> + '_ {
+    pub fn sources(&self) -> impl Iterator<Item = SourceId> {
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
         };
@@ -583,10 +579,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// potentially-finalized block prevents potentially confusing or erroneous situations.
     ///
     pub fn knows_non_finalized_block(
-        &'_ self,
+        &self,
         height: u64,
         hash: &[u8; 32],
-    ) -> impl Iterator<Item = SourceId> + '_ {
+    ) -> impl Iterator<Item = SourceId> {
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
         };
@@ -634,9 +630,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ///
     /// This method doesn't modify the state machine in any way. [`AllSync::add_request`] must be
     /// called in order for the request to actually be marked as started.
-    pub fn desired_requests(
-        &'_ self,
-    ) -> impl Iterator<Item = (SourceId, &'_ TSrc, DesiredRequest)> + '_ {
+    pub fn desired_requests(&self) -> impl Iterator<Item = (SourceId, &TSrc, DesiredRequest)> {
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
         };
@@ -670,7 +664,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             } => DesiredRequest::BlocksRequest {
                                 first_block_height: block_number,
                                 first_block_hash: block_hash,
-                                num_blocks: NonZeroU64::new(1).unwrap(),
+                                num_blocks: NonZero::<u64>::new(1).unwrap(),
                                 request_headers: false,
                                 request_bodies: true,
                                 request_justification: false,
@@ -879,7 +873,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ///
     /// > **Note**: It is in no way mandatory to actually call this function and cancel the
     /// >           requests that are returned.
-    pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = RequestId> + '_ {
+    pub fn obsolete_requests(&self) -> impl Iterator<Item = RequestId> {
         // TODO: not implemented properly
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
@@ -1051,7 +1045,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     warp_sync: self.warp_sync,
                     ready_to_transition: self.ready_to_transition,
                     shared: self.shared,
-                })
+                });
             }
             all_forks::ProcessOne::FinalityProofVerify(inner) => {
                 return ProcessOne::VerifyFinalityProof(FinalityProofVerify {
@@ -1059,7 +1053,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     warp_sync: self.warp_sync,
                     ready_to_transition: self.ready_to_transition,
                     shared: self.shared,
-                })
+                });
             }
         }
 
@@ -1076,11 +1070,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Panics if the [`SourceId`] is invalid.
     ///
     pub fn block_announce(
-        &mut self,
+        &'_ mut self,
         source_id: SourceId,
         announced_scale_encoded_header: Vec<u8>,
         is_best: bool,
-    ) -> BlockAnnounceOutcome<TRq, TSrc, TBl> {
+    ) -> BlockAnnounceOutcome<'_, TRq, TSrc, TBl> {
         let Some(&SourceMapping {
             all_forks: inner_source_id,
             ..
@@ -1643,7 +1637,7 @@ pub enum DesiredRequest {
         ///
         /// This might be equal to `u64::MAX` in case no upper bound is required. The API
         /// user is responsible for clamping this value to a reasonable limit.
-        num_blocks: NonZeroU64,
+        num_blocks: NonZero<u64>,
         /// `True` if headers should be included in the response.
         request_headers: bool,
         /// `True` if bodies should be included in the response.
@@ -1696,7 +1690,7 @@ pub enum RequestDetail {
         ///
         /// This might be equal to `u64::MAX` in case no upper bound is required. The API
         /// user is responsible for clamping this value to a reasonable limit.
-        num_blocks: NonZeroU64,
+        num_blocks: NonZero<u64>,
         /// `True` if headers should be included in the response.
         request_headers: bool,
         /// `True` if bodies should be included in the response.
@@ -2020,8 +2014,8 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     ///
     /// This is `Some` if and only if [`Config::download_bodies`] is `true`
     pub fn scale_encoded_extrinsics(
-        &'_ self,
-    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
+        &self,
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone> {
         self.inner.scale_encoded_extrinsics()
     }
 
@@ -2093,14 +2087,14 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
 }
 
 /// Error that can happen when verifying a block header.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum HeaderVerifyError {
     /// Block can't be verified as it uses an unknown consensus engine.
     UnknownConsensusEngine,
     /// Block uses a different consensus than the rest of the chain.
     ConsensusMismatch,
     /// The block verification has failed. The block is invalid and should be thrown away.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     VerificationFailed(verify::header_only::Error),
 }
 
@@ -2128,8 +2122,8 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     ///
     /// This is `Some` if and only if [`Config::download_bodies`] is `true`
     pub fn scale_encoded_extrinsics(
-        &'_ self,
-    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
+        &self,
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone> {
         self.inner.scale_encoded_extrinsics()
     }
 
@@ -2448,7 +2442,7 @@ struct Shared<TRq, TSrc> {
     /// Value passed through [`Config::max_disjoint_headers`].
     max_disjoint_headers: usize,
     /// Value passed through [`Config::max_requests_per_block`].
-    max_requests_per_block: NonZeroU32,
+    max_requests_per_block: NonZero<u32>,
     /// Value passed through [`Config::block_number_bytes`].
     block_number_bytes: usize,
     /// Value passed through [`Config::allow_unknown_consensus_engines`].

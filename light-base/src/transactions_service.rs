@@ -77,16 +77,11 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::{
-    cmp, iter,
-    num::{NonZeroU32, NonZeroUsize},
-    pin,
-    time::Duration,
-};
+use core::{cmp, iter, num::NonZero, pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{future, FutureExt as _, StreamExt as _};
+use futures_util::{FutureExt as _, StreamExt as _, future};
 use itertools::Itertools as _;
 use smoldot::{
     header,
@@ -120,16 +115,16 @@ pub struct Config<TPlat: PlatformRef> {
     /// Maximum number of pending transactions allowed in the service.
     ///
     /// Any extra transaction will lead to [`DropReason::MaxPendingTransactionsReached`].
-    pub max_pending_transactions: NonZeroU32,
+    pub max_pending_transactions: NonZero<u32>,
 
     /// Maximum number of block body downloads that can be performed in parallel.
     ///
     /// > **Note**: This is the maximum number of *blocks* whose body is being download, not the
     /// >           number of block requests emitted on the network.
-    pub max_concurrent_downloads: NonZeroU32,
+    pub max_concurrent_downloads: NonZero<u32>,
 
     /// Maximum number of transaction validations that can be performed in parallel.
-    pub max_concurrent_validations: NonZeroU32,
+    pub max_concurrent_validations: NonZero<u32>,
 }
 
 /// See [the module-level documentation](..).
@@ -351,7 +346,7 @@ pub enum DropReason {
 }
 
 /// Failed to check the validity of a transaction.
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum ValidateTransactionError {
     /// The runtime of the requested block is invalid.
     InvalidRuntime(runtime_service::RuntimeError),
@@ -366,7 +361,7 @@ pub enum ValidateTransactionError {
     ///
     /// There is no point in trying to validate the transaction call again, as it would result
     /// in the same error.
-    #[display(fmt = "Error during the execution of the runtime: {_0}")]
+    #[display("Error during the execution of the runtime: {_0}")]
     Execution(runtime_service::RuntimeCallExecutionError),
 
     /// Error trying to access the storage required for the runtime call.
@@ -375,9 +370,9 @@ pub enum ValidateTransactionError {
     /// there can be multiple errors.
     ///
     /// Trying the same transaction again might succeed.
-    #[display(fmt = "Error trying to access the storage required for the runtime call")]
+    #[display("Error trying to access the storage required for the runtime call")]
     // TODO: better display?
-    Inaccessible(Vec<runtime_service::RuntimeCallInaccessibleError>),
+    Inaccessible(#[error(not(source))] Vec<runtime_service::RuntimeCallInaccessibleError>),
 
     /// Error while decoding the output of the runtime.
     OutputDecodeError(validate::DecodeError),
@@ -459,7 +454,7 @@ async fn background_task<TPlat: PlatformRef>(
                     // malicious.
                     worker
                         .runtime_service
-                        .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
+                        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
                         .await,
                 )
             };
@@ -542,6 +537,7 @@ async fn background_task<TPlat: PlatformRef>(
             &config.log_target,
             "reset",
             new_finalized = HashDisplay(&initial_finalized_block_hash),
+            subscription_id = ?subscribe_all.new_blocks.id(),
             dropped_transactions
         );
 
@@ -728,7 +724,7 @@ async fn background_task<TPlat: PlatformRef>(
                         },
                         3,
                         Duration::from_secs(8),
-                        NonZeroU32::new(3).unwrap(),
+                        NonZero::<u32>::new(3).unwrap(),
                     );
 
                     Box::pin(async move {
@@ -756,10 +752,6 @@ async fn background_task<TPlat: PlatformRef>(
 
             // Remove finalized blocks from the pool when possible.
             for block in worker.pending_transactions.prune_finalized_with_body() {
-                // All blocks in `pending_transactions` are pinned within the runtime service.
-                // Unpin them when they're removed.
-                subscribe_all.new_blocks.unpin_block(block.block_hash).await;
-
                 log!(
                     &worker.platform,
                     Debug,
@@ -772,6 +764,10 @@ async fn background_task<TPlat: PlatformRef>(
                         .map(|tx| HashDisplay(&blake2_hash(&tx.scale_encoding)).to_string())
                         .join(", ")
                 );
+
+                // All blocks in `pending_transactions` are pinned within the runtime service.
+                // Unpin them when they're removed.
+                subscribe_all.new_blocks.unpin_block(block.block_hash).await;
 
                 debug_assert!(!block.user_data.downloading);
                 for mut tx in block.included_transactions {
@@ -858,6 +854,14 @@ async fn background_task<TPlat: PlatformRef>(
                         worker.set_best_block(&config.log_target, &best_block_hash_if_changed);
                     }
                     for pruned in worker.pending_transactions.set_finalized_block(&hash) {
+                        log!(
+                            &worker.platform,
+                            Debug,
+                            &config.log_target,
+                            "pruned-block-discard",
+                            block = HashDisplay(&pruned.0),
+                        );
+
                         // All blocks in `pending_transactions` are pinned within the
                         // runtime service. Unpin them when they're removed.
                         subscribe_all.new_blocks.unpin_block(pruned.0).await;
@@ -1474,7 +1478,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
     {
         Ok(r) => r,
         Err(runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
-            return Err(ValidationError::ObsoleteSubscription)
+            return Err(ValidationError::ObsoleteSubscription);
         }
         Err(runtime_service::PinPinnedBlockRuntimeError::BlockNotPinned) => unreachable!(),
     };
@@ -1497,7 +1501,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
         }),
         3,
         Duration::from_secs(8),
-        NonZeroU32::new(1).unwrap(),
+        NonZero::<u32>::new(1).unwrap(),
     );
 
     let success = match runtime_call_future.await {
@@ -1505,29 +1509,29 @@ async fn validate_transaction<TPlat: PlatformRef>(
         Err(runtime_service::RuntimeCallError::Execution(error)) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::Execution(error)),
-            ))
+            ));
         }
         Err(runtime_service::RuntimeCallError::Crash) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::Crash),
-            ))
+            ));
         }
         Err(runtime_service::RuntimeCallError::Inaccessible(errors)) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::Inaccessible(errors)),
-            ))
+            ));
         }
         Err(runtime_service::RuntimeCallError::InvalidRuntime(error)) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::InvalidRuntime(error)),
-            ))
+            ));
         }
         Err(runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(
                     ValidateTransactionError::ApiVersionRequirementUnfulfilled,
                 ),
-            ))
+            ));
         }
     };
 

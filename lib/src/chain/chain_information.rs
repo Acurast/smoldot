@@ -41,7 +41,7 @@
 use crate::header;
 
 use alloc::{boxed::Box, vec::Vec};
-use core::num::NonZeroU64;
+use core::num::NonZero;
 
 pub mod build;
 
@@ -61,7 +61,7 @@ impl From<ValidChainInformation> for ChainInformation {
 
 impl ValidChainInformation {
     /// Gives access to the information.
-    pub fn as_ref(&self) -> ChainInformationRef {
+    pub fn as_ref(&'_ self) -> ChainInformationRef<'_> {
         From::from(&self.inner)
     }
 }
@@ -178,13 +178,13 @@ pub enum ChainInformationConsensus {
         finalized_authorities_list: Vec<header::AuraAuthority>,
 
         /// Duration, in milliseconds, of an Aura slot.
-        slot_duration: NonZeroU64,
+        slot_duration: NonZero<u64>,
     },
 
     /// Chain is using the Babe consensus engine.
     Babe {
         /// Number of slots per epoch. Configured at the genesis block and never touched later.
-        slots_per_epoch: NonZeroU64,
+        slots_per_epoch: NonZero<u64>,
 
         /// Babe epoch information about the epoch the finalized block belongs to.
         ///
@@ -498,13 +498,13 @@ pub enum ChainInformationConsensusRef<'a> {
         finalized_authorities_list: header::AuraAuthoritiesIter<'a>,
 
         /// See equivalent field in [`ChainInformationConsensus`].
-        slot_duration: NonZeroU64,
+        slot_duration: NonZero<u64>,
     },
 
     /// Chain is using the Babe consensus engine.
     Babe {
         /// See equivalent field in [`ChainInformationConsensus`].
-        slots_per_epoch: NonZeroU64,
+        slots_per_epoch: NonZero<u64>,
 
         /// See equivalent field in [`ChainInformationConsensus`].
         finalized_block_epoch_information: Option<BabeEpochInformationRef<'a>>,
@@ -599,7 +599,7 @@ impl<'a> From<&'a ChainInformationFinality> for ChainInformationFinalityRef<'a> 
 }
 
 /// Error when turning a [`ChainInformation`] into a [`ValidChainInformation`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ValidityError {
     /// The finalized block doesn't use the same consensus algorithm as the one in the chain
     /// information.
@@ -623,12 +623,12 @@ pub enum ValidityError {
     /// The finalized block is block number 0, but the GrandPa authorities set id is not 0.
     FinalizedZeroButNonZeroAuthoritiesSetId,
     /// Error in a Babe epoch information.
-    #[display(fmt = "Error in a Babe epoch information: {_0}")]
+    #[display("Error in a Babe epoch information: {_0}")]
     InvalidBabe(BabeValidityError),
 }
 
 /// Error when checking the validity of a Babe epoch.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum BabeValidityError {
     /// Babe constant should be a fraction where the numerator is inferior or equal to the
     /// denominator.

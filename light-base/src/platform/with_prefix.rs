@@ -67,11 +67,7 @@ impl<T: PlatformRef> PlatformRef for WithPrefix<T> {
         self.inner.sleep_until(when)
     }
 
-    fn spawn_task(
-        &self,
-        task_name: Cow<str>,
-        task: impl futures_util::future::Future<Output = ()> + Send + 'static,
-    ) {
+    fn spawn_task(&self, task_name: Cow<str>, task: impl Future<Output = ()> + Send + 'static) {
         self.inner
             .spawn_task(Cow::Owned(format!("{}-{}", self.prefix, task_name)), task)
     }
@@ -93,11 +89,11 @@ impl<T: PlatformRef> PlatformRef for WithPrefix<T> {
         )
     }
 
-    fn client_name(&self) -> Cow<str> {
+    fn client_name(&'_ self) -> Cow<'_, str> {
         self.inner.client_name()
     }
 
-    fn client_version(&self) -> Cow<str> {
+    fn client_version(&'_ self) -> Cow<'_, str> {
         self.inner.client_version()
     }
 

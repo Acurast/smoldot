@@ -104,15 +104,14 @@ impl WebRtcFraming {
             // Try to parse a frame from the incoming buffer.
             let bytes_to_discard = {
                 // TODO: we could in theory demand from the outside just the protobuf header, and then later the data, which would save some copying but might considerably complexifies the code
-                let mut parser =
-                    nom::combinator::map_parser::<_, _, _, nom::error::Error<&[u8]>, _, _>(
-                        nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                        protobuf::message_decode! {
-                            #[optional] flags = 1 => protobuf::enum_tag_decode,
-                            #[optional] message = 2 => protobuf::bytes_tag_decode,
-                        },
-                    );
-                match parser(&outer_read_write.incoming_buffer) {
+                let mut parser = nom::combinator::map_parser::<_, _, nom::error::Error<&[u8]>, _, _>(
+                    nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
+                    protobuf::message_decode! {
+                        #[optional] flags = 1 => protobuf::enum_tag_decode,
+                        #[optional] message = 2 => protobuf::bytes_tag_decode,
+                    },
+                );
+                match nom::Parser::parse(&mut parser, &outer_read_write.incoming_buffer) {
                     Ok((rest, framed_message)) => {
                         // The remote has sent a `RESET_STREAM` flag, immediately stop with an error.
                         // The specification mentions that the receiver may discard any data already
@@ -344,7 +343,7 @@ impl<'a, TNow: Clone> Drop for InnerReadWrite<'a, TNow> {
 }
 
 /// Error while decoding data.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// The remote wants to reset the substream. This is a normal situation.
     RemoteResetDesired,

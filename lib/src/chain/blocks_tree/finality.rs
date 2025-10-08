@@ -47,8 +47,10 @@ impl<T> NonFinalizedTree<T> {
                 ops::Bound::Unbounded,
             ))
             .map(|(_prev_auth_change_trigger_number, block_index)| {
-                debug_assert!(_prev_auth_change_trigger_number
-                    .map_or(false, |n| n > self.finalized_block_number));
+                debug_assert!(
+                    _prev_auth_change_trigger_number
+                        .map_or(false, |n| n > self.finalized_block_number)
+                );
                 let block = self
                     .blocks
                     .get(*block_index)
@@ -69,11 +71,11 @@ impl<T> NonFinalizedTree<T> {
     /// verification is nonetheless deterministic.
     // TODO: expand the documentation about how blocks with authorities changes have to be finalized before any further block can be finalized
     pub fn verify_justification(
-        &mut self,
+        &'_ mut self,
         consensus_engine_id: [u8; 4],
         scale_encoded_justification: &[u8],
         randomness_seed: [u8; 32],
-    ) -> Result<FinalityApply<T>, JustificationVerifyError> {
+    ) -> Result<FinalityApply<'_, T>, JustificationVerifyError> {
         match (&self.finality, &consensus_engine_id) {
             (Finality::Grandpa { .. }, b"FRNK") => {
                 // Turn justification into a strongly-typed struct.
@@ -119,10 +121,10 @@ impl<T> NonFinalizedTree<T> {
     /// A randomness seed must be provided and will be used during the verification. Note that the
     /// verification is nonetheless deterministic.
     pub fn verify_grandpa_commit_message(
-        &mut self,
+        &'_ mut self,
         scale_encoded_commit: &[u8],
         randomness_seed: [u8; 32],
-    ) -> Result<FinalityApply<T>, CommitVerifyError> {
+    ) -> Result<FinalityApply<'_, T>, CommitVerifyError> {
         // The code below would panic if the chain doesn't use Grandpa.
         if !matches!(self.finality, Finality::Grandpa { .. }) {
             return Err(CommitVerifyError::NotGrandpa);
@@ -157,10 +159,10 @@ impl<T> NonFinalizedTree<T> {
                 verify::CommitVerify::FinishedUnknown => {
                     return Err(CommitVerifyError::NotEnoughKnownBlocks {
                         target_block_number: decoded_commit.target_number,
-                    })
+                    });
                 }
                 verify::CommitVerify::Finished(Err(error)) => {
-                    return Err(CommitVerifyError::VerificationFailed(error))
+                    return Err(CommitVerifyError::VerificationFailed(error));
                 }
                 verify::CommitVerify::IsAuthority(is_authority) => {
                     let to_find = is_authority.authority_public_key();
@@ -200,9 +202,9 @@ impl<T> NonFinalizedTree<T> {
     /// If necessary, the current best block will be updated to be a descendant of the
     /// newly-finalized block.
     pub fn set_finalized_block(
-        &mut self,
+        &'_ mut self,
         block_hash: &[u8; 32],
-    ) -> Result<SetFinalizedBlockIter<T>, SetFinalizedError> {
+    ) -> Result<SetFinalizedBlockIter<'_, T>, SetFinalizedError> {
         let block_index = match self.blocks_by_hash.get(block_hash) {
             Some(idx) => *idx,
             None => return Err(SetFinalizedError::UnknownBlock),
@@ -221,14 +223,14 @@ impl<T> NonFinalizedTree<T> {
     /// Panics if the finality algorithm of the chain isn't Grandpa.
     ///
     fn verify_grandpa_finality_inner(
-        &'_ self,
+        &self,
         target_hash: &[u8; 32],
         target_number: u64,
     ) -> Result<
         (
             fork_tree::NodeIndex,
             u64,
-            impl Iterator<Item = &'_ [u8]> + Clone + '_,
+            impl Iterator<Item = &[u8]> + Clone,
         ),
         FinalityVerifyError,
     > {
@@ -241,10 +243,10 @@ impl<T> NonFinalizedTree<T> {
             } => {
                 match target_number.cmp(&self.finalized_block_number) {
                     cmp::Ordering::Equal if *target_hash == self.finalized_block_hash => {
-                        return Err(FinalityVerifyError::EqualToFinalized)
+                        return Err(FinalityVerifyError::EqualToFinalized);
                     }
                     cmp::Ordering::Equal => {
-                        return Err(FinalityVerifyError::EqualFinalizedHeightButInequalHash)
+                        return Err(FinalityVerifyError::EqualFinalizedHeightButInequalHash);
                     }
                     cmp::Ordering::Less => return Err(FinalityVerifyError::BelowFinalized),
                     _ => {}
@@ -309,9 +311,9 @@ impl<T> NonFinalizedTree<T> {
     /// Panics if `block_index_to_finalize` isn't a valid node in the tree.
     ///
     fn set_finalized_block_inner(
-        &mut self,
+        &'_ mut self,
         block_index_to_finalize: fork_tree::NodeIndex,
-    ) -> SetFinalizedBlockIter<T> {
+    ) -> SetFinalizedBlockIter<'_, T> {
         let new_finalized_block = self.blocks.get_mut(block_index_to_finalize).unwrap();
 
         // Update `self.finality`.
@@ -334,9 +336,11 @@ impl<T> NonFinalizedTree<T> {
                 debug_assert!(
                     *after_finalized_block_authorities_set_id <= *after_block_authorities_set_id
                 );
-                debug_assert!(scheduled_change
-                    .as_ref()
-                    .map_or(true, |(n, _)| *n > new_finalized_block.number));
+                debug_assert!(
+                    scheduled_change
+                        .as_ref()
+                        .map_or(true, |(n, _)| *n > new_finalized_block.number)
+                );
 
                 *after_finalized_block_authorities_set_id = *after_block_authorities_set_id;
                 *finalized_triggered_authorities = triggered_authorities.clone();
@@ -471,7 +475,7 @@ impl<'c, T> fmt::Debug for FinalityApply<'c, T> {
 }
 
 /// Error that can happen when verifying a justification.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum JustificationVerifyError {
     /// Type of the justification doesn't match the finality mechanism used by the chain.
     ///
@@ -479,43 +483,43 @@ pub enum JustificationVerifyError {
     /// >           always returned.
     JustificationEngineMismatch,
     /// Error while decoding the justification.
-    #[display(fmt = "Error while decoding the justification: {_0}")]
+    #[display("Error while decoding the justification: {_0}")]
     InvalidJustification(decode::JustificationDecodeError),
     /// The justification verification has failed. The justification is invalid and should be
     /// thrown away.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     VerificationFailed(verify::JustificationVerifyError),
     /// Error while verifying the finality in the context of the chain.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     FinalityVerify(FinalityVerifyError),
 }
 
 /// Error that can happen when verifying a Grandpa commit.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum CommitVerifyError {
     /// Chain doesn't use the GrandPa algorithm.
     NotGrandpa,
     /// Error while decoding the commit.
     InvalidCommit,
     /// Error while verifying the finality in the context of the chain.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     FinalityVerify(FinalityVerifyError),
     /// Not enough blocks are known by the tree to verify this commit.
     ///
     /// This doesn't mean that the commit is bad, but that it can't be verified without adding
     /// more blocks to the tree.
-    #[display(fmt = "Not enough blocks are known to verify this commit")]
+    #[display("Not enough blocks are known to verify this commit")]
     NotEnoughKnownBlocks {
         /// Block number that the commit targets.
         target_block_number: u64,
     },
     /// The commit verification has failed. The commit is invalid and should be thrown away.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     VerificationFailed(verify::CommitVerifyError),
 }
 
 /// Error that can happen when verifying a proof of finality.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum FinalityVerifyError {
     /// The target block height and hash are the same as the block that is already finalized.
     /// While the proof couldn't be verified, nothing could be gained from actually verifying it.
@@ -526,7 +530,7 @@ pub enum FinalityVerifyError {
     /// The target block height is strictly inferior to the finalized block height.
     BelowFinalized,
     /// Finality proof targets a block that isn't in the chain.
-    #[display(fmt = "Justification targets a block (#{block_number}) that isn't in the chain.")]
+    #[display("Justification targets a block (#{block_number}) that isn't in the chain.")]
     UnknownTargetBlock {
         /// Number of the block that isn't in the chain.
         block_number: u64,
@@ -536,8 +540,8 @@ pub enum FinalityVerifyError {
     /// There exists a block in-between the latest finalized block and the block targeted by the
     /// justification that must first be finalized.
     #[display(
-        fmt = "There exists a block in-between the latest finalized block and the block \
-                     targeted by the justification that must first be finalized"
+        "There exists a block in-between the latest finalized block and the block \
+        targeted by the justification that must first be finalized"
     )]
     TooFarAhead {
         /// Number of the block contained in the justification.
@@ -615,7 +619,7 @@ impl<'a, T> Drop for SetFinalizedBlockIter<'a, T> {
 }
 
 /// Error that can happen when setting the finalized block.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum SetFinalizedError {
     /// Block must have been passed to [`NonFinalizedTree::insert_verified_header`] in the past.
     UnknownBlock,

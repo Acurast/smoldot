@@ -63,8 +63,8 @@ use core::{
     time::Duration,
 };
 use rand_chacha::{
-    rand_core::{RngCore as _, SeedableRng as _},
     ChaCha20Rng,
+    rand_core::{RngCore as _, SeedableRng as _},
 };
 
 pub use super::peer_id::PeerId;
@@ -2151,7 +2151,7 @@ pub enum Event<TConn> {
 }
 
 /// Reason why a connection is shutting down. See [`Event::StartShutdown`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ShutdownCause {
     /// Shutdown was demanded by the remote and performed cleanly.
     CleanShutdown,
@@ -2165,13 +2165,13 @@ pub enum ShutdownCause {
     HandshakeTimeout,
 }
 
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum RequestError {
     /// Request has been canceled because the connection as a whole is being shut down.
     ConnectionShutdown,
 
     /// Error happened in the context of the substream.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Substream(established::RequestError),
 }
 
@@ -2186,28 +2186,28 @@ impl RequestError {
     }
 }
 
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum NotificationsOutErr {
     /// Opening has been interrupted because the connection as a whole is being shut down.
     ConnectionShutdown,
 
     /// Error happened in the context of the substream.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Substream(established::NotificationsOutErr),
 }
 
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum NotificationsInClosedErr {
     /// Substream has been closed because the connection as a whole is being shut down.
     ConnectionShutdown,
 
     /// Error happened in the context of the substream.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Substream(established::NotificationsInClosedErr),
 }
 
 /// Error potentially returned by [`Network::queue_notification`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum QueueNotificationError {
     /// Queue of notifications with that peer is full.
     QueueFull,

@@ -45,15 +45,11 @@ use alloc::{
     collections::{BTreeSet, VecDeque},
     vec::Vec,
 };
-use core::{
-    cmp, fmt, mem,
-    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-    ops,
-};
+use core::{cmp, fmt, mem, num::NonZero, ops};
 use rand::seq::IteratorRandom as _;
 use rand_chacha::{
-    rand_core::{RngCore as _, SeedableRng as _},
     ChaCha20Rng,
+    rand_core::{RngCore as _, SeedableRng as _},
 };
 
 pub use header::GoAwayErrorCode;
@@ -89,20 +85,20 @@ pub struct Config {
     /// impossible to tell.
     ///
     /// A typical value is `8192`.
-    pub max_out_data_frame_size: NonZeroU32,
+    pub max_out_data_frame_size: NonZero<u32>,
 
     /// When the remote sends a ping, we need to send out a pong. However, the remote could refuse
     /// to read any additional data from the socket and continue sending pings, thus increasing
     /// the local buffer size indefinitely. In order to protect against this attack, there exists
     /// a maximum number of queued pongs, after which the connection will be shut down abruptly.
-    pub max_simultaneous_queued_pongs: NonZeroUsize,
+    pub max_simultaneous_queued_pongs: NonZero<usize>,
 
     /// When the remote sends a substream, and this substream gets rejected by the API user, some
     /// data needs to be sent out. However, the remote could refuse reading any additional data
     /// and continue sending new substream requests, thus increasing the local buffer size
     /// indefinitely. In order to protect against this attack, there exists a maximum number of
     /// queued substream rejections after which the connection will be shut down abruptly.
-    pub max_simultaneous_rst_substreams: NonZeroUsize,
+    pub max_simultaneous_rst_substreams: NonZero<usize>,
 }
 
 /// Yamux state machine. See [the module-level documentation](..) for more information.
@@ -116,11 +112,11 @@ struct YamuxInner<TNow, TSub> {
     /// List of substreams currently open in the Yamux state machine.
     ///
     /// A `SipHasher` is used in order to avoid hash collision attacks on substream IDs.
-    substreams: hashbrown::HashMap<NonZeroU32, Substream<TNow, TSub>, SipHasherBuild>,
+    substreams: hashbrown::HashMap<NonZero<u32>, Substream<TNow, TSub>, SipHasherBuild>,
 
     /// Subset of the content of [`YamuxInner::substreams`] that is considered "dead", meaning
     /// that it is returned by [`Yamux::dead_substreams`].
-    dead_substreams: hashbrown::HashSet<NonZeroU32, SipHasherBuild>,
+    dead_substreams: hashbrown::HashSet<NonZero<u32>, SipHasherBuild>,
 
     /// Subset of the content of [`YamuxInner::substreams`] that requires some process because
     /// they have data in their read buffer or their `wake_up_after` value is reached.
@@ -129,7 +125,7 @@ struct YamuxInner<TNow, TSub> {
     ///
     /// Keys are the time after which this substream should be processed, which can be inferior or
     /// equal to "now" for an immediate wake up. A key equal to `None` means "right now".
-    substreams_wake_up: BTreeSet<(Option<TNow>, NonZeroU32)>,
+    substreams_wake_up: BTreeSet<(Option<TNow>, NonZero<u32>)>,
 
     /// List of substreams that might want to write out additional data. Processed when it is
     /// possible to send out data.
@@ -138,11 +134,11 @@ struct YamuxInner<TNow, TSub> {
     ///
     /// Contrary to [`YamuxInner::substreams_wake_up`], the substreams in this list are processed
     /// only if it is possible to queue out more data for sending.
-    substreams_write_ready: hashbrown::HashSet<NonZeroU32, SipHasherBuild>,
+    substreams_write_ready: hashbrown::HashSet<NonZero<u32>, SipHasherBuild>,
 
     /// List of window frames to send to the remote. For each substream, the amount of bytes to
     /// add to the window.
-    window_frames_to_send: hashbrown::HashMap<NonZeroU32, NonZeroU64, SipHasherBuild>,
+    window_frames_to_send: hashbrown::HashMap<NonZero<u32>, NonZero<u64>, SipHasherBuild>,
 
     /// Number of substreams within [`YamuxInner::substreams`] whose [`Substream::inbound`] is
     /// `true`.
@@ -161,12 +157,12 @@ struct YamuxInner<TNow, TSub> {
     outgoing: Outgoing,
 
     /// See [`Config::max_out_data_frame_size`].
-    max_out_data_frame_size: NonZeroU32,
+    max_out_data_frame_size: NonZero<u32>,
 
     /// Id of the next outgoing substream to open.
     /// This implementation allocates identifiers linearly. Every time a substream is open, its
     /// value is incremented by two.
-    next_outbound_substream: NonZeroU32,
+    next_outbound_substream: NonZero<u32>,
 
     /// Number of pings to send out that haven't been queued yet.
     pings_to_send: usize,
@@ -179,14 +175,14 @@ struct YamuxInner<TNow, TSub> {
     pongs_to_send: VecDeque<u32>,
 
     /// See [`Config::max_simultaneous_queued_pongs`].
-    max_simultaneous_queued_pongs: NonZeroUsize,
+    max_simultaneous_queued_pongs: NonZero<usize>,
 
     /// List of substream IDs that have been reset locally. For each entry, a RST header should
     /// be sent to the remote.
-    rsts_to_send: VecDeque<NonZeroU32>,
+    rsts_to_send: VecDeque<NonZero<u32>>,
 
     /// See [`Config::max_simultaneous_rst_substreams`].
-    max_simultaneous_rst_substreams: NonZeroUsize,
+    max_simultaneous_rst_substreams: NonZero<usize>,
 
     /// Source of randomness used for various purposes.
     randomness: ChaCha20Rng,
@@ -252,7 +248,7 @@ enum Incoming {
     /// is still data to be received.
     DataFrame {
         /// Identifier of the substream the data belongs to.
-        substream_id: NonZeroU32,
+        substream_id: NonZero<u32>,
         /// Number of bytes of data remaining before the frame ends.
         remaining_bytes: u32,
     },
@@ -261,7 +257,7 @@ enum Incoming {
     /// is blocked waiting for the API user to accept or reject this substream.
     PendingIncomingSubstream {
         /// Identifier of the pending substream.
-        substream_id: NonZeroU32,
+        substream_id: NonZero<u32>,
         /// Extra local window size to give to this substream.
         extra_window: u32,
         /// If non-zero, must transition to a [`Incoming::DataFrame`].
@@ -278,7 +274,7 @@ enum Outgoing {
     },
     PreparingDataFrame {
         /// Substream concerned by the data frame. Always healthy.
-        substream_id: NonZeroU32,
+        substream_id: NonZero<u32>,
         /// Buffers of data that the substream is producing. Does not include the Yamux header.
         /// Must never be empty.
         write_buffers: Vec<Vec<u8>>,
@@ -353,9 +349,9 @@ impl<TNow, TSub> Yamux<TNow, TSub> {
                 outgoing_goaway: OutgoingGoAway::NotRequired,
                 max_out_data_frame_size: config.max_out_data_frame_size,
                 next_outbound_substream: if config.is_initiator {
-                    NonZeroU32::new(1).unwrap()
+                    NonZero::<u32>::new(1).unwrap()
                 } else {
-                    NonZeroU32::new(2).unwrap()
+                    NonZero::<u32>::new(2).unwrap()
                 },
                 pings_to_send: 0,
                 // We leave the initial capacity at 0, as it is likely that no ping is sent at all.
@@ -640,7 +636,8 @@ where
 
                     // In the rare situation where the window update doesn't fit in a `u32`, we
                     // have to send another window frame again later.
-                    if let Some(pending_window_increase) = NonZeroU64::new(pending_window_increase)
+                    if let Some(pending_window_increase) =
+                        NonZero::<u64>::new(pending_window_increase)
                     {
                         self.inner
                             .window_frames_to_send
@@ -1036,7 +1033,7 @@ where
                             if (self.inner.next_outbound_substream.get() % 2)
                                 == (stream_id.get() % 2)
                             {
-                                return Err(Error::InvalidInboundStreamId(stream_id));
+                                return Err(Error::InvalidInboundStreamId { stream_id });
                             }
 
                             // Remote has sent a SYN flag. A new substream is to be opened.
@@ -1066,7 +1063,7 @@ where
                                     state: SubstreamState::Healthy { .. },
                                     ..
                                 }) => {
-                                    return Err(Error::UnexpectedSyn(stream_id));
+                                    return Err(Error::UnexpectedSyn { stream_id });
                                 }
                             }
 
@@ -1430,7 +1427,7 @@ where
             .unwrap_or_else(|| panic!())
             .state
         {
-            let Some(bytes) = NonZeroU64::new(bytes) else {
+            let Some(bytes) = NonZero::<u64>::new(bytes) else {
                 return;
             };
 
@@ -1565,9 +1562,7 @@ where
     /// This function does not remove dead substreams from the state machine. In other words, if
     /// this function is called multiple times in a row, it will always return the same
     /// substreams. Use [`Yamux::remove_dead_substream`] to remove substreams.
-    pub fn dead_substreams(
-        &'_ self,
-    ) -> impl Iterator<Item = (SubstreamId, DeadSubstreamTy, &'_ TSub)> + '_ {
+    pub fn dead_substreams(&self) -> impl Iterator<Item = (SubstreamId, DeadSubstreamTy, &TSub)> {
         self.inner.dead_substreams.iter().map(|id| {
             let substream = self.inner.substreams.get(id).unwrap();
             match &substream.state {
@@ -1608,11 +1603,13 @@ where
             panic!()
         }
 
-        debug_assert!(!self
-            .inner
-            .substreams_wake_up
-            .iter()
-            .any(|(_, s)| s == &id.0));
+        debug_assert!(
+            !self
+                .inner
+                .substreams_wake_up
+                .iter()
+                .any(|(_, s)| s == &id.0)
+        );
         debug_assert!(!self.inner.window_frames_to_send.contains_key(&id.0));
         debug_assert!(!self.inner.substreams_write_ready.contains(&id.0));
 
@@ -1745,13 +1742,13 @@ impl<TNow, TSub> fmt::Debug for Yamux<TNow, TSub>
 where
     TSub: fmt::Debug,
 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         struct List<'a, TNow, TSub>(&'a Yamux<TNow, TSub>);
         impl<'a, TNow, TSub> fmt::Debug for List<'a, TNow, TSub>
         where
             TSub: fmt::Debug,
         {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 f.debug_list()
                     .entries(self.0.inner.substreams.values().map(|v| &v.user_data))
                     .finish()
@@ -1766,17 +1763,17 @@ where
 
 /// Identifier of a substream in the context of a connection.
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, derive_more::From)]
-pub struct SubstreamId(NonZeroU32);
+pub struct SubstreamId(NonZero<u32>);
 
 impl SubstreamId {
     /// Value that compares inferior or equal to all possible values.
-    pub const MIN: Self = Self(match NonZeroU32::new(1) {
+    pub const MIN: Self = Self(match NonZero::<u32>::new(1) {
         Some(v) => v,
         None => unreachable!(),
     });
 
     /// Value that compares superior or equal to all possible values.
-    pub const MAX: Self = Self(match NonZeroU32::new(u32::MAX) {
+    pub const MAX: Self = Self(match NonZero::<u32>::new(u32::MAX) {
         Some(v) => v,
         None => unreachable!(),
     });
@@ -1854,7 +1851,7 @@ where
     outer_read_write: &'a mut ReadWrite<TNow>,
     inner_read_write: ReadWrite<TNow>,
     yamux: Yamux<TNow, TSub>,
-    substream_id: NonZeroU32,
+    substream_id: NonZero<u32>,
 
     /// Size of the write buffers of the substream prior to its processing.
     write_buffers_len_before: usize,
@@ -1926,18 +1923,18 @@ where
 
         // If the substream requests more data than the remote is allowed to send, send out a
         // window frame. This ensures that the reading can never stall due to window frames issues.
-        if let Some(mut missing_window_size) = NonZeroUsize::new(
+        if let Some(mut missing_window_size) = NonZero::<usize>::new(
             expected_incoming_bytes
                 .unwrap()
                 .saturating_sub(usize::try_from(*remote_allowed_window).unwrap_or(usize::MAX)),
         ) {
             // Don't send super tiny window frames.
             if missing_window_size.get() < 1024 {
-                missing_window_size = NonZeroUsize::new(1024).unwrap();
+                missing_window_size = NonZero::<usize>::new(1024).unwrap();
             }
 
             let missing_window_size =
-                NonZeroU64::new(u64::try_from(missing_window_size.get()).unwrap_or(u64::MAX))
+                NonZero::<u64>::new(u64::try_from(missing_window_size.get()).unwrap_or(u64::MAX))
                     .unwrap();
 
             self.yamux
@@ -2098,22 +2095,28 @@ where
         {
             let _was_inserted = self.yamux.inner.dead_substreams.insert(self.substream_id);
             debug_assert!(_was_inserted);
-            debug_assert!(!self
-                .yamux
-                .inner
-                .substreams_wake_up
-                .iter()
-                .any(|(_, s)| *s == self.substream_id));
-            debug_assert!(!self
-                .yamux
-                .inner
-                .substreams_write_ready
-                .contains(&self.substream_id));
-            debug_assert!(!self
-                .yamux
-                .inner
-                .window_frames_to_send
-                .contains_key(&self.substream_id));
+            debug_assert!(
+                !self
+                    .yamux
+                    .inner
+                    .substreams_wake_up
+                    .iter()
+                    .any(|(_, s)| *s == self.substream_id)
+            );
+            debug_assert!(
+                !self
+                    .yamux
+                    .inner
+                    .substreams_write_ready
+                    .contains(&self.substream_id)
+            );
+            debug_assert!(
+                !self
+                    .yamux
+                    .inner
+                    .window_frames_to_send
+                    .contains_key(&self.substream_id)
+            );
         }
 
         self.yamux
@@ -2136,7 +2139,7 @@ impl<'a, TNow, TSub> fmt::Debug for SubstreamReadWrite<'a, TNow, TSub>
 where
     TNow: Clone + cmp::Ord,
 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("SubstreamReadWrite")
             .field("substream_id", &self.substream_id)
             .finish()
@@ -2144,7 +2147,7 @@ where
 }
 
 /// Error potentially returned by [`Yamux::open_substream`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum OpenSubstreamError {
     /// A `GoAway` frame has been received in the past.
     GoAwayReceived,
@@ -2153,7 +2156,7 @@ pub enum OpenSubstreamError {
 }
 
 /// Error potentially returned by [`Yamux::reset`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ResetError {
     /// Substream was already reset.
     AlreadyReset,
@@ -2162,7 +2165,7 @@ pub enum ResetError {
 }
 
 /// Error potentially returned by [`Yamux::send_goaway`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum SendGoAwayError {
     /// A `GoAway` has already been sent.
     AlreadySent,
@@ -2170,22 +2173,23 @@ pub enum SendGoAwayError {
 
 /// Error potentially returned by [`Yamux::accept_pending_substream`] or
 /// [`Yamux::reject_pending_substream`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum PendingSubstreamError {
     /// No substream is pending.
     NoPendingSubstream,
 }
 
 /// Error while decoding the Yamux stream.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// Failed to decode an incoming Yamux header.
     HeaderDecode(header::YamuxHeaderDecodeError),
     /// Received a SYN flag with a substream ID that is of the same side as the local side.
-    InvalidInboundStreamId(NonZeroU32),
+    #[display("Received a SYN flag with a substream ID that is of the same side as the local side")]
+    InvalidInboundStreamId { stream_id: NonZero<u32> },
     /// Received a SYN flag with a known substream ID.
-    #[display(fmt = "Received a SYN flag with a known substream ID")]
-    UnexpectedSyn(NonZeroU32),
+    #[display("Received a SYN flag with a known substream ID")]
+    UnexpectedSyn { stream_id: NonZero<u32> },
     /// Remote tried to send more data than it was allowed to.
     CreditsExceeded,
     /// Number of credits allocated to the local node has overflowed.

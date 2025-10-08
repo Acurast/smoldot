@@ -19,7 +19,7 @@ use super::Error;
 use crate::util;
 
 use alloc::vec::Vec;
-use core::{cmp, fmt, iter, num::NonZeroU64, slice};
+use core::{cmp, fmt, iter, num::NonZero, slice};
 
 /// A consensus log item for GrandPa.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,13 +72,14 @@ pub enum GrandpaConsensusLogRef<'a> {
 impl<'a> GrandpaConsensusLogRef<'a> {
     /// Decodes a [`GrandpaConsensusLogRef`] from a slice of bytes.
     pub fn from_slice(slice: &'a [u8], block_number_bytes: usize) -> Result<Self, Error> {
-        Ok(
-            nom::combinator::all_consuming(grandpa_consensus_log_ref(block_number_bytes))(slice)
-                .map_err(|_: nom::Err<(&[u8], nom::error::ErrorKind)>| {
-                    Error::GrandpaConsensusLogDecodeError
-                })?
-                .1,
+        Ok(nom::Parser::parse(
+            &mut nom::combinator::all_consuming(grandpa_consensus_log_ref(block_number_bytes)),
+            slice,
         )
+        .map_err(|_: nom::Err<(&[u8], nom::error::ErrorKind)>| {
+            Error::GrandpaConsensusLogDecodeError
+        })?
+        .1)
     }
 
     /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
@@ -86,7 +87,7 @@ impl<'a> GrandpaConsensusLogRef<'a> {
     pub fn scale_encoding(
         &self,
         block_number_bytes: usize,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         let index = iter::once(match self {
             GrandpaConsensusLogRef::ScheduledChange(_) => [1],
             GrandpaConsensusLogRef::ForcedChange { .. } => [2],
@@ -245,7 +246,7 @@ impl<'a> GrandpaScheduledChangeRef<'a> {
     pub fn scale_encoding(
         &self,
         block_number_bytes: usize,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         let header = util::encode_scale_compact_usize(self.next_authorities.len());
 
         let mut delay = Vec::with_capacity(block_number_bytes);
@@ -319,9 +320,12 @@ impl<'a> Iterator for GrandpaAuthoritiesIter<'a> {
             GrandpaAuthoritiesIterInner::Encoded(inner) => {
                 let item = inner.next()?;
                 Some(
-                    nom::combinator::all_consuming::<_, _, (&[u8], nom::error::ErrorKind), _>(
-                        grandpa_authority_ref,
-                    )(item)
+                    nom::Parser::parse(
+                        &mut nom::combinator::all_consuming::<_, (&[u8], nom::error::ErrorKind), _>(
+                            grandpa_authority_ref,
+                        ),
+                        item,
+                    )
                     .unwrap()
                     .1,
                 )
@@ -369,7 +373,7 @@ pub struct GrandpaAuthorityRef<'a> {
     /// Arbitrary number indicating the weight of the authority.
     ///
     /// This value can only be compared to other weight values.
-    pub weight: NonZeroU64,
+    pub weight: NonZero<u64>,
 }
 
 impl<'a> GrandpaAuthorityRef<'a> {
@@ -377,7 +381,7 @@ impl<'a> GrandpaAuthorityRef<'a> {
     /// encoding of that object.
     pub fn scale_encoding(
         &self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         iter::once(either::Right(self.public_key))
             .chain(iter::once(either::Left(self.weight.get().to_le_bytes())))
     }
@@ -400,15 +404,13 @@ pub struct GrandpaAuthority {
     /// Arbitrary number indicating the weight of the authority.
     ///
     /// This value can only be compared to other weight values.
-    pub weight: NonZeroU64,
+    pub weight: NonZero<u64>,
 }
 
 impl GrandpaAuthority {
     /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
     /// encoding of that object.
-    pub fn scale_encoding(
-        &'_ self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_ {
+    pub fn scale_encoding(&self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
         GrandpaAuthorityRef::from(self).scale_encoding()
     }
 }
@@ -427,24 +429,24 @@ fn grandpa_consensus_log_ref<
     E: nom::error::ParseError<&'a [u8]> + nom::error::ContextError<&'a [u8]>,
 >(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], GrandpaConsensusLogRef<'a>, E> {
+) -> impl nom::Parser<&'a [u8], Output = GrandpaConsensusLogRef<'a>, Error = E> {
     nom::error::context(
         "grandpa_consensus_log_ref",
         nom::branch::alt((
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[1]),
+                    nom::bytes::streaming::tag(&[1][..]),
                     grandpa_scheduled_change_ref(block_number_bytes),
                 ),
                 GrandpaConsensusLogRef::ScheduledChange,
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[2]),
-                    nom::sequence::tuple((
+                    nom::bytes::streaming::tag(&[2][..]),
+                    (
                         crate::util::nom_varsize_number_decode_u64(block_number_bytes),
                         grandpa_scheduled_change_ref(block_number_bytes),
-                    )),
+                    ),
                 ),
                 |(reset_block_height, change)| GrandpaConsensusLogRef::ForcedChange {
                     reset_block_height,
@@ -453,21 +455,21 @@ fn grandpa_consensus_log_ref<
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[3]),
+                    nom::bytes::streaming::tag(&[3][..]),
                     nom::number::streaming::le_u64,
                 ),
                 GrandpaConsensusLogRef::OnDisabled,
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[4]),
+                    nom::bytes::streaming::tag(&[4][..]),
                     crate::util::nom_varsize_number_decode_u64(block_number_bytes),
                 ),
                 GrandpaConsensusLogRef::Pause,
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[5]),
+                    nom::bytes::streaming::tag(&[5][..]),
                     crate::util::nom_varsize_number_decode_u64(block_number_bytes),
                 ),
                 GrandpaConsensusLogRef::Resume,
@@ -481,11 +483,11 @@ fn grandpa_scheduled_change_ref<
     E: nom::error::ParseError<&'a [u8]> + nom::error::ContextError<&'a [u8]>,
 >(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], GrandpaScheduledChangeRef<'a>, E> {
+) -> impl nom::Parser<&'a [u8], Output = GrandpaScheduledChangeRef<'a>, Error = E> {
     nom::error::context(
         "grandpa_scheduled_change_ref",
         nom::combinator::map(
-            nom::sequence::tuple((
+            (
                 nom::combinator::flat_map(util::nom_scale_compact_usize, |num_authorities| {
                     nom::combinator::map(
                         nom::combinator::recognize(nom::multi::fold_many_m_n(
@@ -503,7 +505,7 @@ fn grandpa_scheduled_change_ref<
                     )
                 }),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
-            )),
+            ),
             |(next_authorities, delay)| GrandpaScheduledChangeRef {
                 next_authorities,
                 delay,
@@ -518,17 +520,20 @@ fn grandpa_authority_ref<
 >(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], GrandpaAuthorityRef<'a>, E> {
-    nom::error::context(
-        "grandpa_authority_ref",
-        nom::combinator::map(
-            nom::sequence::tuple((
-                nom::bytes::streaming::take(32u32),
-                nom::combinator::map_opt(nom::number::streaming::le_u64, NonZeroU64::new),
-            )),
-            |(public_key, weight)| GrandpaAuthorityRef {
-                public_key: TryFrom::try_from(public_key).unwrap(),
-                weight,
-            },
+    nom::Parser::parse(
+        &mut nom::error::context(
+            "grandpa_authority_ref",
+            nom::combinator::map(
+                (
+                    nom::bytes::streaming::take(32u32),
+                    nom::combinator::map_opt(nom::number::streaming::le_u64, NonZero::<u64>::new),
+                ),
+                |(public_key, weight)| GrandpaAuthorityRef {
+                    public_key: TryFrom::try_from(public_key).unwrap(),
+                    weight,
+                },
+            ),
         ),
-    )(bytes)
+        bytes,
+    )
 }

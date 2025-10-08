@@ -16,15 +16,11 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use alloc::borrow::Cow;
-use core::{
-    fmt, future::Future, net::IpAddr, ops, panic::UnwindSafe, pin::Pin, str, time::Duration,
-};
-use futures_util::future;
+use core::{fmt, net::IpAddr, ops, panic::UnwindSafe, pin::Pin, str, time::Duration};
 
 pub use smoldot::libp2p::read_write;
 
 #[cfg(feature = "std")]
-#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub use smoldot::libp2p::with_buffers;
 
 // TODO: this module should probably not be public?
@@ -34,7 +30,6 @@ pub mod default;
 mod with_prefix;
 
 #[cfg(feature = "std")]
-#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub use default::DefaultPlatform;
 
 pub use with_prefix::WithPrefix;
@@ -148,11 +143,7 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
     /// >           difficult if not impossible to implement this trait on `Future`s. It is for
     /// >           the same reason that the `std::thread::spawn` function of the standard library
     /// >           doesn't require its parameter to implement `UnwindSafe`.
-    fn spawn_task(
-        &self,
-        task_name: Cow<str>,
-        task: impl future::Future<Output = ()> + Send + 'static,
-    );
+    fn spawn_task(&self, task_name: Cow<str>, task: impl Future<Output = ()> + Send + 'static);
 
     /// Emit a log line.
     ///
@@ -177,11 +168,11 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
 
     /// Value returned when a JSON-RPC client requests the name of the client, or when a peer
     /// performs an identification request. Reasonable value is `env!("CARGO_PKG_NAME")`.
-    fn client_name(&self) -> Cow<str>;
+    fn client_name(&'_ self) -> Cow<'_, str>;
 
     /// Value returned when a JSON-RPC client requests the version of the client, or when a peer
     /// performs an identification request. Reasonable value is `env!("CARGO_PKG_VERSION")`.
-    fn client_version(&self) -> Cow<str>;
+    fn client_version(&'_ self) -> Cow<'_, str>;
 
     /// Returns `true` if [`PlatformRef::connect_stream`] or [`PlatformRef::connect_multistream`]
     /// accepts a connection of the corresponding type.

@@ -32,7 +32,7 @@ use alloc::{
     borrow::ToOwned as _, boxed::Box, collections::VecDeque, format, string::String, sync::Arc,
     vec::Vec,
 };
-use core::{cmp, fmt, future::Future, mem, num::NonZeroU32, pin::Pin, time::Duration};
+use core::{cmp, fmt, mem, num::NonZero, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use rand::seq::IteratorRandom as _;
 use rand_chacha::rand_core::SeedableRng as _;
@@ -41,7 +41,7 @@ use smoldot::{
     executor::host,
     libp2p::PeerId,
     network::{codec, service},
-    trie::{self, prefix_proof, proof_decode, Nibble},
+    trie::{self, Nibble, minimize_proof, prefix_proof, proof_decode},
 };
 
 mod parachain;
@@ -122,10 +122,6 @@ pub struct ConfigParachain<TPlat: PlatformRef> {
     /// >           parachain.
     pub para_id: u32,
 }
-
-/// Identifier for a blocks request to be performed.
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub struct BlocksRequestId(usize);
 
 pub struct SyncService<TPlat: PlatformRef> {
     /// Sender of messages towards the background task.
@@ -316,12 +312,12 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         fields: codec::BlocksRequestFields,
         total_attempts: u32,
         timeout_per_request: Duration,
-        _max_parallel: NonZeroU32,
+        _max_parallel: NonZero<u32>,
     ) -> Result<codec::BlockData, ()> {
         // TODO: better error?
         let request_config = codec::BlocksRequestConfig {
             start: codec::BlocksRequestConfigStart::Hash(hash),
-            desired_count: NonZeroU32::new(1).unwrap(),
+            desired_count: NonZero::<u32>::new(1).unwrap(),
             direction: codec::BlocksRequestDirection::Ascending,
             fields: fields.clone(),
         };
@@ -365,12 +361,12 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         fields: codec::BlocksRequestFields,
         total_attempts: u32,
         timeout_per_request: Duration,
-        _max_parallel: NonZeroU32,
+        _max_parallel: NonZero<u32>,
     ) -> Result<codec::BlockData, ()> {
         // TODO: better error?
         let request_config = codec::BlocksRequestConfig {
             start: codec::BlocksRequestConfigStart::Hash(hash),
-            desired_count: NonZeroU32::new(1).unwrap(),
+            desired_count: NonZero::<u32>::new(1).unwrap(),
             direction: codec::BlocksRequestDirection::Ascending,
             fields: fields.clone(),
         };
@@ -466,7 +462,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         requests: impl Iterator<Item = StorageRequestItem>,
         total_attempts: u32,
         timeout_per_request: Duration,
-        max_parallel: NonZeroU32,
+        max_parallel: NonZero<u32>,
     ) -> StorageQuery<TPlat> {
         let total_attempts = usize::try_from(total_attempts).unwrap_or(usize::MAX);
 
@@ -492,6 +488,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     key: request.key,
                     hash: true,
                 },
+                StorageRequestItemTy::MerkleProof => RequestImpl::MerkleProof { key: request.key },
                 StorageRequestItemTy::ClosestDescendantMerkleValue => {
                     RequestImpl::ClosestDescendantMerkleValue { key: request.key }
                 }
@@ -540,27 +537,25 @@ pub enum StorageRequestItemTy {
     /// A [`StorageResultItem::Hash`] will be returned containing the potential hash.
     Hash,
 
+    /// The merkle proof of the storage value associated to the [`StorageRequestItem::key`] is requested.
+    /// A [`StorageResultItem::MerkleProof`] will be returned containing the proof.
+    MerkleProof,
+
     /// The list of the descendants of the [`StorageRequestItem::key`] (including the `key`
     /// itself) that have a storage value is requested.
     ///
-    /// Zero or more [`StorageResultItem::DescendantValue`] will be returned where the
-    /// [`StorageResultItem::DescendantValue::requested_key`] is equal to
-    /// [`StorageRequestItem::key`].
+    /// Zero or more [`StorageResultItem::DescendantValue`] will be returned.
     DescendantsValues,
 
     /// The list of the descendants of the [`StorageRequestItem::key`] (including the `key`
     /// itself) that have a storage value is requested.
     ///
-    /// Zero or more [`StorageResultItem::DescendantHash`] will be returned where the
-    /// [`StorageResultItem::DescendantHash::requested_key`] is equal to
-    /// [`StorageRequestItem::key`].
+    /// Zero or more [`StorageResultItem::DescendantHash`] will be returned.
     DescendantsHashes,
 
     /// The Merkle value of the trie node that is the closest ancestor to
     /// [`StorageRequestItem::key`] is requested.
-    /// A [`StorageResultItem::ClosestDescendantMerkleValue`] will be returned where
-    /// [`StorageResultItem::ClosestDescendantMerkleValue::requested_key`] is equal to
-    /// [`StorageRequestItem::key`].
+    /// A [`StorageResultItem::ClosestDescendantMerkleValue`] will be returned.
     ClosestDescendantMerkleValue,
 }
 
@@ -583,20 +578,21 @@ pub enum StorageResultItem {
         /// associated with that key.
         hash: Option<[u8; 32]>,
     },
+    /// Corresponds to a [`StorageRequestItemTy::MerkleProof`].
+    MerkleProof {
+        /// Merkle proof of the storage value of the key.
+        proof: Vec<u8>,
+    },
     /// Corresponds to a [`StorageRequestItemTy::DescendantsValues`].
     DescendantValue {
-        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
-        requested_key: Vec<u8>,
-        /// Equal or a descendant of [`StorageResultItem::DescendantValue::requested_key`].
+        /// Equal or a descendant of the requested key.
         key: Vec<u8>,
         /// Storage value associated with [`StorageResultItem::DescendantValue::key`].
         value: Vec<u8>,
     },
     /// Corresponds to a [`StorageRequestItemTy::DescendantsHashes`].
     DescendantHash {
-        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
-        requested_key: Vec<u8>,
-        /// Equal or a descendant of [`StorageResultItem::DescendantHash::requested_key`].
+        /// Equal or a descendant of the requested key.
         key: Vec<u8>,
         /// Hash of the storage value associated with [`StorageResultItem::DescendantHash::key`].
         hash: [u8; 32],
@@ -609,8 +605,7 @@ pub enum StorageResultItem {
         /// [`StorageResultItem::ClosestDescendantMerkleValue::closest_descendant_merkle_value`]
         /// is `Some`, then this is always the parent of the requested key.
         found_closest_ancestor_excluding: Option<Vec<Nibble>>,
-        /// Merkle value of the closest descendant of
-        /// [`StorageResultItem::DescendantValue::requested_key`]. The key that corresponds
+        /// Merkle value of the closest descendant of the requested key. The key that corresponds
         /// to this Merkle value is not included. `None` if the key has no descendant.
         closest_descendant_merkle_value: Option<Vec<u8>>,
     },
@@ -631,7 +626,7 @@ pub struct StorageQuery<TPlat: PlatformRef> {
     /// How long to wait for a response to the request.
     timeout_per_request: Duration,
     // TODO: value presently ignored
-    _max_parallel: NonZeroU32,
+    _max_parallel: NonZero<u32>,
     /// Non-fatal errors that have happened in the network requests.
     outcome_errors: Vec<StorageQueryErrorDetail>,
     /// List of responses that are available to yield.
@@ -655,6 +650,9 @@ enum RequestImpl {
     ValueOrHash {
         key: Vec<u8>,
         hash: bool,
+    },
+    MerkleProof {
+        key: Vec<u8>,
     },
     ClosestDescendantMerkleValue {
         key: Vec<u8>,
@@ -737,7 +735,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                 }
                             }
                         }
-                        RequestImpl::ValueOrHash { key, .. } => {
+                        RequestImpl::ValueOrHash { key, .. } | RequestImpl::MerkleProof { key } => {
                             if keys.insert(key.clone()) {
                                 max_reponse_nodes += key.len() * 2;
                             }
@@ -810,8 +808,9 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                 }
             };
 
+            let proof_bytes = proof.decode();
             let decoded_proof = match proof_decode::decode_and_verify_proof(proof_decode::Config {
-                proof: proof.decode(),
+                proof: proof_bytes.as_ref(),
             }) {
                 Ok(d) => d,
                 Err(err) => {
@@ -838,7 +837,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         requested_key,
                     } => {
                         // TODO: how "partial" do we accept that the proof is? it should be considered malicious if the full node might return the minimum amount of information
-                        match scan.resume_partial(proof.decode()) {
+                        match scan.resume_partial(proof_bytes) {
                             Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
                                 proof_has_advanced_verification = true;
                                 self.requests_remaining.push((
@@ -862,11 +861,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                             debug_assert!(!full_storage_values_required);
                                             self.available_results.push_back((
                                                 request_index,
-                                                StorageResultItem::DescendantHash {
-                                                    key,
-                                                    hash,
-                                                    requested_key: requested_key.clone(),
-                                                },
+                                                StorageResultItem::DescendantHash { key, hash },
                                             ));
                                         }
                                         prefix_proof::StorageValue::Value(value)
@@ -874,11 +869,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                         {
                                             self.available_results.push_back((
                                                 request_index,
-                                                StorageResultItem::DescendantValue {
-                                                    requested_key: requested_key.clone(),
-                                                    key,
-                                                    value,
-                                                },
+                                                StorageResultItem::DescendantValue { key, value },
                                             ));
                                         }
                                         prefix_proof::StorageValue::Value(value) => {
@@ -892,7 +883,6 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                                         hashed_value.as_bytes(),
                                                     )
                                                     .unwrap(),
-                                                    requested_key: requested_key.clone(),
                                                 },
                                             ));
                                         }
@@ -983,6 +973,28 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                             }
                         }
                     }
+                    RequestImpl::MerkleProof { key } => {
+                        match decoded_proof.trie_node_info(
+                            &self.main_trie_root_hash,
+                            trie::bytes_to_nibbles(key.iter().copied()),
+                        ) {
+                            Ok(_) => self.available_results.push_back((
+                                request_index,
+                                StorageResultItem::MerkleProof {
+                                    proof: minimize_proof::minimize_proof(
+                                        &decoded_proof,
+                                        &self.main_trie_root_hash,
+                                        &key,
+                                    )
+                                    .unwrap(),
+                                },
+                            )),
+                            Err(proof_decode::IncompleteProofError { .. }) => {
+                                self.requests_remaining
+                                    .push((request_index, RequestImpl::MerkleProof { key }));
+                            }
+                        }
+                    }
                     RequestImpl::ClosestDescendantMerkleValue { key } => {
                         let key_nibbles = trie::bytes_to_nibbles(key.iter().copied());
 
@@ -1061,7 +1073,7 @@ pub enum StorageQueryProgress<TPlat: PlatformRef> {
 
 /// Error that can happen when calling [`SyncService::storage_query`].
 // TODO: remove?
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, derive_more::Error)]
 pub struct StorageQueryError {
     /// Contains one error per peer that has been contacted. If this list is empty, then we
     /// aren't connected to any node.
@@ -1109,13 +1121,13 @@ impl fmt::Display for StorageQueryError {
 }
 
 /// See [`StorageQueryError`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum StorageQueryErrorDetail {
     /// Error during the network request.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Network(network_service::StorageProofRequestError),
     /// Error verifying the proof.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     ProofVerification(proof_decode::Error),
     /// Proof is missing one or more desired storage items.
     MissingProofEntry,

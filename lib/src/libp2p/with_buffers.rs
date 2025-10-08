@@ -16,7 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #![cfg(feature = "std")]
-#![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 //! Augments an implementation of `AsyncRead` and `AsyncWrite` with a read buffer and a write
 //! buffer.
@@ -109,15 +108,16 @@ where
     /// > **Note**: The parameter requires `Self` to be pinned for consistency with
     /// >           [`WithBuffers::wait_read_write_again`].
     pub fn read_write_access(
-        self: Pin<&mut Self>,
+        self: Pin<&'_ mut Self>,
         now: TNow,
-    ) -> Result<ReadWriteAccess<TNow>, &io::Error> {
+    ) -> Result<ReadWriteAccess<'_, TNow>, &'_ io::Error> {
         let this = self.project();
 
-        debug_assert!(this
-            .read_write_now
-            .as_ref()
-            .map_or(true, |old_now| *old_now <= now));
+        debug_assert!(
+            this.read_write_now
+                .as_ref()
+                .map_or(true, |old_now| *old_now <= now)
+        );
         *this.read_write_wake_up_after = None;
         *this.read_write_now = Some(now.clone());
 
@@ -166,7 +166,7 @@ where
 impl<TSocketFut, TSocket, TNow> WithBuffers<TSocketFut, TSocket, TNow>
 where
     TSocket: AsyncRead + AsyncWrite,
-    TSocketFut: future::Future<Output = Result<TSocket, io::Error>>,
+    TSocketFut: Future<Output = Result<TSocket, io::Error>>,
     TNow: Clone + Ord,
 {
     /// Waits until [`WithBuffers::read_write_access`] should be called again.
@@ -179,7 +179,7 @@ where
         self: Pin<&mut Self>,
         timer_builder: impl FnOnce(TNow) -> F,
     ) where
-        F: future::Future<Output = ()>,
+        F: Future<Output = ()>,
     {
         let mut this = self.project();
 
@@ -218,7 +218,7 @@ where
             // If still `true` at the end of the function, `Poll::Pending` is returned.
             let mut pending = true;
 
-            match future::Future::poll(Pin::new(&mut timer), cx) {
+            match Future::poll(Pin::new(&mut timer), cx) {
                 Poll::Pending => {}
                 Poll::Ready(()) => {
                     pending = false;
@@ -226,7 +226,7 @@ where
             }
 
             match this.socket.as_mut().project() {
-                SocketProj::Pending(future) => match future::Future::poll(future, cx) {
+                SocketProj::Pending(future) => match Future::poll(future, cx) {
                     Poll::Pending => {}
                     Poll::Ready(Ok(socket)) => {
                         this.socket.set(Socket::Resolved(socket));

@@ -52,7 +52,7 @@
 //! identities of the other nodes of the peer-to-peer network.
 //!
 //! Assuming that all the network identities that exist are distributed uniformly, the k-buckets
-//! will hold more network identities that are close to the the local node's network identity, and
+//! will hold more network identities that are close to the local node's network identity, and
 //! fewer network identities that are far away. In other words, the k-buckets store the neighbors
 //! of the local node, and a few far-away nodes.
 //!
@@ -241,7 +241,7 @@ where
 }
 
 /// Error that can happen in [`Entry::or_insert`].
-#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display)]
+#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display, derive_more::Error)]
 pub enum OrInsertError {
     /// K-bucket is full.
     Full,
@@ -345,7 +345,7 @@ where
 }
 
 /// Error that can happen in [`VacantEntry::insert`].
-#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display)]
+#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display, derive_more::Error)]
 pub enum InsertError {
     /// K-bucket is full.
     Full,
@@ -556,11 +556,13 @@ mod tests {
         // Iterator that generates random keys that are in the maximum size bucket.
         let mut max_bucket_keys = {
             let local_key_hash = Sha256::digest(&local_key);
-            (0..).map(move |_| loop {
-                let other_key: [u8; 32] = rand::random();
-                let other_key_hashed = Sha256::digest(other_key);
-                if ((local_key_hash[0] ^ other_key_hashed[0]) & 0x80) != 0 {
-                    break other_key.to_vec();
+            (0..).map(move |_| {
+                loop {
+                    let other_key: [u8; 32] = rand::random();
+                    let other_key_hashed = Sha256::digest(other_key);
+                    if ((local_key_hash[0] ^ other_key_hashed[0]) & 0x80) != 0 {
+                        break other_key.to_vec();
+                    }
                 }
             })
         };
@@ -582,9 +584,10 @@ mod tests {
         // Inserting another node in that bucket. Since it's full, the insertion must fail.
         match buckets.entry(&max_bucket_keys.next().unwrap()) {
             super::Entry::Vacant(e) => {
-                assert!(e
-                    .insert((), &Duration::new(0, 0), super::PeerState::Disconnected)
-                    .is_err());
+                assert!(
+                    e.insert((), &Duration::new(0, 0), super::PeerState::Disconnected)
+                        .is_err()
+                );
             }
             _ => panic!(),
         }
@@ -593,9 +596,10 @@ mod tests {
         // the insertion must succeed.
         match buckets.entry(&max_bucket_keys.next().unwrap()) {
             super::Entry::Vacant(e) => {
-                assert!(e
-                    .insert((), &Duration::new(2, 0), super::PeerState::Disconnected)
-                    .is_ok());
+                assert!(
+                    e.insert((), &Duration::new(2, 0), super::PeerState::Disconnected)
+                        .is_ok()
+                );
             }
             _ => panic!(),
         }

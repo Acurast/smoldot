@@ -21,8 +21,8 @@
 use crate::{chain::chain_information, header, verify};
 
 use super::{
-    fmt, Arc, BestScore, Block, BlockConsensus, BlockFinality, Duration, Finality,
-    FinalizedConsensus, NonFinalizedTree, Vec,
+    Arc, BestScore, Block, BlockConsensus, BlockFinality, Duration, Finality, FinalizedConsensus,
+    NonFinalizedTree, Vec, fmt,
 };
 
 impl<T> NonFinalizedTree<T> {
@@ -106,10 +106,12 @@ impl<T> NonFinalizedTree<T> {
                         ref finalized_scheduled_change,
                         ref finalized_triggered_authorities,
                     } => {
-                        debug_assert!(finalized_scheduled_change
-                            .as_ref()
-                            .map(|(n, _)| *n >= decoded_header.number)
-                            .unwrap_or(true));
+                        debug_assert!(
+                            finalized_scheduled_change
+                                .as_ref()
+                                .map(|(n, _)| *n >= decoded_header.number)
+                                .unwrap_or(true)
+                        );
                         BlockFinality::Grandpa {
                             prev_auth_change_trigger_number: None,
                             triggers_change: false,
@@ -159,7 +161,7 @@ impl<T> NonFinalizedTree<T> {
                     now_from_unix_epoch,
                 },
                 (FinalizedConsensus::Unknown, None) => {
-                    return Err(HeaderVerifyError::UnknownConsensusEngine)
+                    return Err(HeaderVerifyError::UnknownConsensusEngine);
                 }
                 _ => {
                     return Err(HeaderVerifyError::ConsensusMismatch);
@@ -420,14 +422,18 @@ impl<T> NonFinalizedTree<T> {
                 }
 
                 // Some sanity checks.
-                debug_assert!(scheduled_change
-                    .as_ref()
-                    .map(|(n, _)| *n > decoded_header.number)
-                    .unwrap_or(true));
-                debug_assert!(parent_prev_auth_change_trigger_number
-                    .as_ref()
-                    .map(|n| *n < decoded_header.number)
-                    .unwrap_or(true));
+                debug_assert!(
+                    scheduled_change
+                        .as_ref()
+                        .map(|(n, _)| *n > decoded_header.number)
+                        .unwrap_or(true)
+                );
+                debug_assert!(
+                    parent_prev_auth_change_trigger_number
+                        .as_ref()
+                        .map(|n| *n < decoded_header.number)
+                        .unwrap_or(true)
+                );
 
                 BlockFinality::Grandpa {
                     prev_auth_change_trigger_number: if *parent_triggers_change {
@@ -602,22 +608,22 @@ pub enum HeaderVerifySuccess {
 
 /// Error that can happen when verifying a block header.
 // TODO: some of these errors are redundant with verify::header_only::Error
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum HeaderVerifyError {
     /// Error while decoding the header.
-    #[display(fmt = "Error while decoding the header: {_0}")]
+    #[display("Error while decoding the header: {_0}")]
     InvalidHeader(header::Error),
     /// Block can't be verified as it uses an unknown consensus engine.
     UnknownConsensusEngine,
     /// Block uses a different consensus than the rest of the chain.
     ConsensusMismatch,
     /// The parent of the block isn't known.
-    #[display(fmt = "The parent of the block isn't known.")]
+    #[display("The parent of the block isn't known.")]
     BadParent {
         /// Hash of the parent block in question.
         parent_hash: [u8; 32],
     },
     /// The block verification has failed. The block is invalid and should be thrown away.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     VerificationFailed(verify::header_only::Error),
 }

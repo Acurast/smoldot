@@ -28,7 +28,7 @@ use alloc::{
 use async_lock::Mutex;
 use core::{
     cmp, fmt, mem,
-    num::NonZeroU32,
+    num::NonZero,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use futures_lite::FutureExt as _;
@@ -95,7 +95,7 @@ struct SerializedIo {
 
     /// Maximum value that [`SerializedIo::num_requests_in_fly`] is allowed to reach.
     /// Beyond this, no more request should be added to [`SerializedIo::requests_queue`].
-    max_requests_in_fly: NonZeroU32,
+    max_requests_in_fly: NonZero<u32>,
 
     /// Queue of responses.
     responses_queue: Mutex<SerializedIoResponses>,
@@ -149,7 +149,7 @@ pub struct Config {
     ///
     /// If this limit is reached, it is not possible to send further requests without pulling
     /// responses first.
-    pub max_pending_requests: NonZeroU32,
+    pub max_pending_requests: NonZero<u32>,
 
     /// Maximum number of simultaneous subscriptions allowed. Trying to create a subscription will
     /// be automatically rejected if this limit is reached.
@@ -359,7 +359,7 @@ impl ClientMainTask {
                             .notify(usize::MAX);
                         continue;
                     }
-                    Err(methods::ParseClientToServerError::UnknownNotification(_)) => continue,
+                    Err(methods::ParseClientToServerError::UnknownNotification { .. }) => continue,
                     Err(methods::ParseClientToServerError::JsonRpcParse(_)) => {
                         let response = parse::build_parse_error_response();
                         let mut responses_queue =
@@ -500,10 +500,12 @@ impl ClientMainTask {
 
                     // Allocate the new subscription ID.
                     let subscription_id = self.allocate_subscription_id();
-                    debug_assert!(!self
-                        .inner
-                        .active_subscriptions
-                        .contains_key(&subscription_id));
+                    debug_assert!(
+                        !self
+                            .inner
+                            .active_subscriptions
+                            .contains_key(&subscription_id)
+                    );
 
                     // Insert an "kill channel" in the local state. This kill channel is shared
                     // with the subscription object and is used to notify when a subscription
@@ -693,7 +695,7 @@ impl ClientMainTask {
 }
 
 impl fmt::Debug for ClientMainTask {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("ClientMainTask").finish()
     }
 }
@@ -919,7 +921,7 @@ impl SerializedRequestsIo {
 }
 
 impl fmt::Debug for SerializedRequestsIo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("SerializedRequestsIo").finish()
     }
 }
@@ -931,41 +933,43 @@ impl Drop for SerializedRequestsIo {
 }
 
 /// See [`SerializedRequestsIo::wait_next_response`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum WaitNextResponseError {
     /// The attached [`ClientMainTask`] has been destroyed.
     ClientMainTaskDestroyed,
 }
 
 /// Error returned by [`SerializedRequestsIo::send_request`].
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "{cause}")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("{cause}")]
 pub struct SendRequestError {
     /// The JSON-RPC request that was passed as parameter.
     pub request: String,
     /// Reason for the error.
+    #[error(source)]
     pub cause: SendRequestErrorCause,
 }
 
 /// See [`SendRequestError::cause`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum SendRequestErrorCause {
     /// The attached [`ClientMainTask`] has been destroyed.
     ClientMainTaskDestroyed,
 }
 
 /// Error returned by [`SerializedRequestsIo::try_send_request`].
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "{cause}")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("{cause}")]
 pub struct TrySendRequestError {
     /// The JSON-RPC request that was passed as parameter.
     pub request: String,
     /// Reason for the error.
+    #[error(source)]
     pub cause: TrySendRequestErrorCause,
 }
 
 /// See [`TrySendRequestError::cause`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum TrySendRequestErrorCause {
     /// Limit to the maximum number of pending requests that was passed as
     /// [`Config::max_pending_requests`] has been reached. No more requests can be sent before
@@ -993,7 +997,7 @@ impl RequestProcess {
     ///
     /// The request is guaranteed to not be related to subscriptions in any way.
     // TODO: with stronger typing users wouldn't have to worry about the type of request
-    pub fn request(&self) -> methods::MethodCall {
+    pub fn request(&'_ self) -> methods::MethodCall<'_> {
         methods::parse_jsonrpc_client_to_server(&self.request)
             .unwrap()
             .1
@@ -1002,7 +1006,7 @@ impl RequestProcess {
     /// Indicate the response to the request to the [`ClientMainTask`].
     ///
     /// Has no effect if the [`ClientMainTask`] has been destroyed.
-    pub fn respond(mut self, response: methods::Response<'_>) {
+    pub fn respond(mut self, response: methods::Response) {
         let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
             .unwrap()
             .0;
@@ -1073,7 +1077,7 @@ impl RequestProcess {
 }
 
 impl fmt::Debug for RequestProcess {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.request, f)
     }
 }
@@ -1120,7 +1124,7 @@ impl SubscriptionStartProcess {
     ///
     /// The request is guaranteed to be a request that starts a subscription.
     // TODO: with stronger typing users wouldn't have to worry about the type of request
-    pub fn request(&self) -> methods::MethodCall {
+    pub fn request(&'_ self) -> methods::MethodCall<'_> {
         methods::parse_jsonrpc_client_to_server(&self.request)
             .unwrap()
             .1
@@ -1215,7 +1219,7 @@ impl SubscriptionStartProcess {
 }
 
 impl fmt::Debug for SubscriptionStartProcess {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.request, f)
     }
 }
@@ -1355,7 +1359,7 @@ impl Subscription {
 }
 
 impl fmt::Debug for Subscription {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("Subscription")
             .field(&self.subscription_id)
             .finish()

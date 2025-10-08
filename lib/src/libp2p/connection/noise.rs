@@ -163,7 +163,7 @@ impl UnsignedNoiseKey {
     }
 
     /// Returns the data that has to be signed.
-    pub fn payload_to_sign(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+    pub fn payload_to_sign(&self) -> impl Iterator<Item = impl AsRef<[u8]>> {
         [
             &b"noise-libp2p-static-key:"[..],
             &self.public_key.as_bytes()[..],
@@ -837,7 +837,7 @@ impl HandshakeInProgress {
                             return Ok(NoiseHandshake::InProgress(self));
                         }
                         Err(read_write::IncomingBytesTakeError::ReadClosed) => {
-                            return Err(HandshakeError::ReadClosed)
+                            return Err(HandshakeError::ReadClosed);
                         }
                     }
                 };
@@ -854,7 +854,7 @@ impl HandshakeInProgress {
                         return Ok(NoiseHandshake::InProgress(self));
                     }
                     Err(read_write::IncomingBytesTakeError::ReadClosed) => {
-                        return Err(HandshakeError::ReadClosed)
+                        return Err(HandshakeError::ReadClosed);
                     }
                 };
 
@@ -868,19 +868,16 @@ impl HandshakeInProgress {
                     self.0.remote_ephemeral_public_key = x25519_dalek::PublicKey::from(*{
                         // Because the remote hasn't authenticated us at this point, sending more
                         // data than what the protocol specifies is forbidden.
-                        let mut parser = nom::combinator::all_consuming::<
-                            _,
-                            _,
-                            (&[u8], nom::error::ErrorKind),
-                            _,
-                        >(nom::combinator::map(
-                            nom::bytes::streaming::take(32u32),
-                            |k| <&[u8; 32]>::try_from(k).unwrap(),
-                        ));
-                        match parser(&available_message) {
+                        let mut parser =
+                            nom::combinator::all_consuming::<_, (&[u8], nom::error::ErrorKind), _>(
+                                nom::combinator::map(nom::bytes::streaming::take(32u32), |k| {
+                                    <&[u8; 32]>::try_from(k).unwrap()
+                                }),
+                            );
+                        match nom::Parser::parse(&mut parser, &available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
-                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
                             }
                         }
                     });
@@ -905,24 +902,22 @@ impl HandshakeInProgress {
                     ) = {
                         // Because the remote hasn't fully authenticated us at this point, sending
                         // more data than what the protocol specifies is forbidden.
-                        let mut parser = nom::combinator::all_consuming::<
-                            _,
-                            _,
-                            (&[u8], nom::error::ErrorKind),
-                            _,
-                        >(nom::sequence::tuple((
-                            nom::combinator::map(nom::bytes::streaming::take(32u32), |k| {
-                                <&[u8; 32]>::try_from(k).unwrap()
-                            }),
-                            nom::combinator::map(nom::bytes::streaming::take(48u32), |k| {
-                                <&[u8; 48]>::try_from(k).unwrap()
-                            }),
-                            nom::combinator::rest,
-                        )));
-                        match parser(&available_message) {
+                        let mut parser =
+                            nom::combinator::all_consuming::<_, (&[u8], nom::error::ErrorKind), _>(
+                                (
+                                    nom::combinator::map(nom::bytes::streaming::take(32u32), |k| {
+                                        <&[u8; 32]>::try_from(k).unwrap()
+                                    }),
+                                    nom::combinator::map(nom::bytes::streaming::take(48u32), |k| {
+                                        <&[u8; 48]>::try_from(k).unwrap()
+                                    }),
+                                    nom::combinator::rest,
+                                ),
+                            );
+                        match nom::Parser::parse(&mut parser, &available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
-                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
                             }
                         }
                     };
@@ -991,17 +986,16 @@ impl HandshakeInProgress {
                             let mut parser =
                                 nom::combinator::all_consuming::<
                                     _,
-                                    _,
                                     (&[u8], nom::error::ErrorKind),
                                     _,
                                 >(protobuf::message_decode! {
                                     #[required] key = 1 => protobuf::bytes_tag_decode,
                                     #[required] sig = 2 => protobuf::bytes_tag_decode,
                                 });
-                            match parser(&libp2p_handshake_decrypted) {
+                            match nom::Parser::parse(&mut parser, &libp2p_handshake_decrypted) {
                                 Ok((_, out)) => (out.key, out.sig),
                                 Err(_) => {
-                                    return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                    return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
                                 }
                             }
                         };
@@ -1032,21 +1026,19 @@ impl HandshakeInProgress {
                         // handshake message and a noise transport message as two different things.
                         // While the remote could in theory send post-handshake
                         // application-specific data in this message, in practice it is forbidden.
-                        let mut parser = nom::combinator::all_consuming::<
-                            _,
-                            _,
-                            (&[u8], nom::error::ErrorKind),
-                            _,
-                        >(nom::sequence::tuple((
-                            nom::combinator::map(nom::bytes::streaming::take(48u32), |k| {
-                                <&[u8; 48]>::try_from(k).unwrap()
-                            }),
-                            nom::combinator::rest,
-                        )));
-                        match parser(&available_message) {
+                        let mut parser =
+                            nom::combinator::all_consuming::<_, (&[u8], nom::error::ErrorKind), _>(
+                                (
+                                    nom::combinator::map(nom::bytes::streaming::take(48u32), |k| {
+                                        <&[u8; 48]>::try_from(k).unwrap()
+                                    }),
+                                    nom::combinator::rest,
+                                ),
+                            );
+                        match nom::Parser::parse(&mut parser, &available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
-                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
                             }
                         }
                     };
@@ -1093,17 +1085,16 @@ impl HandshakeInProgress {
                             let mut parser =
                                 nom::combinator::all_consuming::<
                                     _,
-                                    _,
                                     (&[u8], nom::error::ErrorKind),
                                     _,
                                 >(protobuf::message_decode! {
                                     #[required] key = 1 => protobuf::bytes_tag_decode,
                                     #[required] sig = 2 => protobuf::bytes_tag_decode,
                                 });
-                            match parser(&libp2p_handshake_decrypted) {
+                            match nom::Parser::parse(&mut parser, &libp2p_handshake_decrypted) {
                                 Ok((_, out)) => (out.key, out.sig),
                                 Err(_) => {
-                                    return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                    return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
                                 }
                             }
                         };
@@ -1143,28 +1134,28 @@ impl fmt::Debug for HandshakeInProgress {
 }
 
 /// Potential error during the noise handshake.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum HandshakeError {
     /// Reading side of the connection is closed. The handshake can't proceed further.
     ReadClosed,
     /// Writing side of the connection is closed. The handshake can't proceed further.
     WriteClosed,
     /// Error in the decryption state machine.
-    #[display(fmt = "Cipher error: {_0}")]
+    #[display("Cipher error: {_0}")]
     Cipher(CipherError),
     /// Failed to decode the payload as the libp2p-extension-to-noise payload.
-    #[display(fmt = "Failed to decode payload as the libp2p-extension-to-noise payload: {_0}")]
+    #[display("Failed to decode payload as the libp2p-extension-to-noise payload: {_0}")]
     PayloadDecode(PayloadDecodeError),
     /// Key passed as part of the payload failed to decode into a libp2p public key.
     InvalidKey,
     /// Signature of the noise public key by the libp2p key failed.
-    #[display(fmt = "Signature of the noise public key by the libp2p key failed.")]
+    #[display("Signature of the noise public key by the libp2p key failed.")]
     SignatureVerificationFailed(SignatureVerifyFailed),
 }
 
 /// Error while encrypting data.
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Error while encrypting the Noise payload")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("Error while encrypting the Noise payload")]
 pub enum EncryptError {
     /// The nonce has overflowed because too many messages have been exchanged. This error is a
     /// normal situation and will happen given sufficient time.
@@ -1172,8 +1163,8 @@ pub enum EncryptError {
 }
 
 /// Error while decoding data.
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Error while decrypting the Noise payload")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("Error while decrypting the Noise payload")]
 pub enum CipherError {
     /// Message is too small. This is likely caused by a bug either in this code or in the remote's
     /// code.
@@ -1186,7 +1177,7 @@ pub enum CipherError {
 }
 
 /// Error while decoding the handshake.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub struct PayloadDecodeError;
 
 struct CipherState {
@@ -1201,7 +1192,7 @@ impl CipherState {
     ///
     /// Does *not* include the libp2p-specific message length prefix.
     fn write_chachapoly_message(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         decrypted_buffers: impl Iterator<Item = Vec<u8>>,
     ) -> Result<impl Iterator<Item = Vec<u8>>, EncryptError> {
@@ -1346,7 +1337,7 @@ impl CipherState {
     ///
     /// Does *not* include the libp2p-specific message length prefix.
     fn write_chachapoly_message_to_vec(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         data: &[u8],
     ) -> Result<Vec<u8>, EncryptError> {
@@ -1364,7 +1355,7 @@ impl CipherState {
 
     /// Highly-specific function when the message to decode is 32 bytes.
     fn read_chachapoly_message_to_array(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         message_data: &[u8; 48],
     ) -> Result<[u8; 32], CipherError> {
@@ -1374,7 +1365,7 @@ impl CipherState {
     }
 
     fn read_chachapoly_message_to_vec(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         message_data: &[u8],
     ) -> Result<Vec<u8>, CipherError> {
@@ -1384,7 +1375,7 @@ impl CipherState {
     }
 
     fn read_chachapoly_message_to_vec_append(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         message_data: &[u8],
         out: &mut Vec<u8>,
@@ -1403,7 +1394,7 @@ impl CipherState {
     }
 
     fn read_chachapoly_message_to_slice(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         message_data: &[u8],
         destination: &mut [u8],

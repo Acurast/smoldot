@@ -62,7 +62,7 @@
 //! Once a connection has been established (which is indicated by a [`Event::HandshakeFinished`]
 //! event), one can open a gossip link to this peer using [`ChainNetwork::gossip_open`].
 //!
-//! In order to faciliate this process, the [`ChainNetwork`] provides a "desired gossip links"
+//! In order to facilitate this process, the [`ChainNetwork`] provides a "desired gossip links"
 //! system. Use [`ChainNetwork::gossip_insert_desired`] and [`ChainNetwork::gossip_remove_desired`]
 //! to insert or remove `(ChainId, PeerId, GossipKind)` tuples into the state machine. You can
 //! then use [`ChainNetwork::unconnected_desired`] to obtain a list of [`PeerId`]s that are marked
@@ -419,7 +419,7 @@ where
             hashbrown::hash_map::Entry::Occupied(entry) => {
                 return Err(AddChainError::Duplicate {
                     existing_identical: ChainId(*entry.get()),
-                })
+                });
             }
         }
 
@@ -650,7 +650,7 @@ where
     }
 
     /// Returns the list of all the chains that have been added.
-    pub fn chains(&'_ self) -> impl ExactSizeIterator<Item = ChainId> + '_ {
+    pub fn chains(&self) -> impl ExactSizeIterator<Item = ChainId> {
         self.chains.iter().map(|(idx, _)| ChainId(idx))
     }
 
@@ -899,7 +899,7 @@ where
         &self,
         chain_id: ChainId,
         kind: GossipKind,
-    ) -> impl Iterator<Item = &'_ PeerId> + '_ {
+    ) -> impl Iterator<Item = &PeerId> {
         self.gossip_desired_peers_by_chain
             .range(
                 (chain_id.0, kind, PeerIndex(usize::MIN))
@@ -923,7 +923,7 @@ where
     ///
     /// > **Note**: Connections that are currently in the process of shutting down are also
     /// >           ignored for the purpose of this function.
-    pub fn unconnected_desired(&'_ self) -> impl ExactSizeIterator<Item = &'_ PeerId> + Clone + '_ {
+    pub fn unconnected_desired(&self) -> impl ExactSizeIterator<Item = &PeerId> + Clone {
         self.unconnected_desired
             .iter()
             .map(|peer_index| &self.peers[peer_index.0])
@@ -932,8 +932,8 @@ where
     /// Returns the list of [`PeerId`]s that are marked as desired, and for which a healthy
     /// connection exists, but for which no substream connection attempt exists.
     pub fn connected_unopened_gossip_desired(
-        &'_ self,
-    ) -> impl ExactSizeIterator<Item = (&'_ PeerId, ChainId, GossipKind)> + Clone + '_ {
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&PeerId, ChainId, GossipKind)> + Clone {
         self.connected_unopened_gossip_desired.iter().map(
             move |(peer_index, chain_id, gossip_kind)| {
                 (&self.peers[peer_index.0], *chain_id, *gossip_kind)
@@ -944,8 +944,8 @@ where
     /// Returns the list of [`PeerId`]s for which a substream connection or connection attempt
     /// exists but that are not marked as desired.
     pub fn opened_gossip_undesired(
-        &'_ self,
-    ) -> impl ExactSizeIterator<Item = (&'_ PeerId, ChainId, GossipKind)> + Clone + '_ {
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&PeerId, ChainId, GossipKind)> + Clone {
         self.opened_gossip_undesired
             .iter()
             .map(move |(chain_id, peer_index, gossip_kind)| {
@@ -961,9 +961,9 @@ where
     /// Panics if the [`ChainId`] is invalid.
     ///
     pub fn opened_gossip_undesired_by_chain(
-        &'_ self,
+        &self,
         chain_id: ChainId,
-    ) -> impl Iterator<Item = (&'_ PeerId, GossipKind)> + Clone + '_ {
+    ) -> impl Iterator<Item = (&PeerId, GossipKind)> + Clone {
         // TODO: optimize and add an ExactSizeIterator bound to the return value, and update the users to use len() instead of count()
         self.opened_gossip_undesired
             .iter()
@@ -1653,7 +1653,7 @@ where
                                         chain_id: ChainId(chain_index),
                                         config,
                                         substream_id,
-                                    })
+                                    });
                                 }
                                 Err(error) => {
                                     let _ = self.substreams.remove(&substream_id);
@@ -2051,26 +2051,29 @@ where
                             // This can only happen if we have a block announces substream with
                             // that peer, otherwise the substream opening attempt should have
                             // been cancelled.
-                            debug_assert!(self
-                                .notification_substreams_by_peer_id
-                                .range(
-                                    (
-                                        NotificationsProtocol::BlockAnnounces { chain_index },
-                                        peer_index,
-                                        SubstreamDirection::Out,
-                                        NotificationsSubstreamState::OPEN_MIN_VALUE,
-                                        SubstreamId::MIN
-                                    )
-                                        ..=(
+                            debug_assert!(
+                                self.notification_substreams_by_peer_id
+                                    .range(
+                                        (
                                             NotificationsProtocol::BlockAnnounces { chain_index },
                                             peer_index,
                                             SubstreamDirection::Out,
-                                            NotificationsSubstreamState::OPEN_MAX_VALUE,
-                                            SubstreamId::MAX
+                                            NotificationsSubstreamState::OPEN_MIN_VALUE,
+                                            SubstreamId::MIN
                                         )
-                                )
-                                .next()
-                                .is_some());
+                                            ..=(
+                                                NotificationsProtocol::BlockAnnounces {
+                                                    chain_index
+                                                },
+                                                peer_index,
+                                                SubstreamDirection::Out,
+                                                NotificationsSubstreamState::OPEN_MAX_VALUE,
+                                                SubstreamId::MAX
+                                            )
+                                    )
+                                    .next()
+                                    .is_some()
+                            );
 
                             // If the substream failed to open, we simply try again.
                             // Trying again means that we might be hammering the remote with
@@ -2245,28 +2248,31 @@ where
                                     state.established && !state.shutting_down
                                 })
                             {
-                                debug_assert!(self
-                                    .notification_substreams_by_peer_id
-                                    .range(
-                                        (
-                                            NotificationsProtocol::BlockAnnounces { chain_index },
-                                            peer_index,
-                                            SubstreamDirection::Out,
-                                            NotificationsSubstreamState::MIN,
-                                            SubstreamId::MIN,
-                                        )
-                                            ..=(
+                                debug_assert!(
+                                    self.notification_substreams_by_peer_id
+                                        .range(
+                                            (
                                                 NotificationsProtocol::BlockAnnounces {
                                                     chain_index
                                                 },
                                                 peer_index,
                                                 SubstreamDirection::Out,
-                                                NotificationsSubstreamState::MAX,
-                                                SubstreamId::MAX,
-                                            ),
-                                    )
-                                    .next()
-                                    .is_none());
+                                                NotificationsSubstreamState::MIN,
+                                                SubstreamId::MIN,
+                                            )
+                                                ..=(
+                                                    NotificationsProtocol::BlockAnnounces {
+                                                        chain_index
+                                                    },
+                                                    peer_index,
+                                                    SubstreamDirection::Out,
+                                                    NotificationsSubstreamState::MAX,
+                                                    SubstreamId::MAX,
+                                                ),
+                                        )
+                                        .next()
+                                        .is_none()
+                                );
 
                                 let _was_inserted =
                                     self.connected_unopened_gossip_desired.insert((
@@ -2706,7 +2712,7 @@ where
                                     return Some(Event::ProtocolError {
                                         error: ProtocolError::BadGrandpaNotification(err),
                                         peer_id: self.peers[peer_index.0].clone(),
-                                    })
+                                    });
                                 }
                             };
 
@@ -2720,7 +2726,7 @@ where
                                             block_number_bytes: self.chains[chain_index]
                                                 .block_number_bytes,
                                         },
-                                    })
+                                    });
                                 }
                                 codec::GrandpaNotificationRef::Neighbor(n) => {
                                     return Some(Event::GrandpaNeighborPacket {
@@ -2731,7 +2737,7 @@ where
                                             set_id: n.set_id,
                                             commit_finalized_height: n.commit_finalized_height,
                                         },
-                                    })
+                                    });
                                 }
                                 _ => {
                                     // Any other type of message is currently ignored. Support
@@ -3278,10 +3284,10 @@ where
     /// Panics if the [`ChainId`] is invalid.
     ///
     pub fn gossip_connected_peers(
-        &'_ self,
+        &self,
         chain_id: ChainId,
         kind: GossipKind,
-    ) -> impl Iterator<Item = &'_ PeerId> + '_ {
+    ) -> impl Iterator<Item = &PeerId> {
         assert!(self.chains.contains(chain_id.0));
         let GossipKind::ConsensusTransactions = kind;
 
@@ -3322,7 +3328,7 @@ where
     /// Panics if the [`ChainId`] is invalid.
     ///
     pub fn gossip_is_connected(
-        &'_ self,
+        &self,
         chain_id: ChainId,
         target: &PeerId,
         kind: GossipKind,
@@ -4057,8 +4063,9 @@ where
         // TODO: these numbers are arbitrary, must be made to match Substrate
         match protocol {
             NotificationsProtocol::BlockAnnounces { .. } => 64 * 1024,
-            NotificationsProtocol::Transactions { .. } => 4,
-            NotificationsProtocol::Grandpa { .. } => 32,
+            NotificationsProtocol::Transactions { .. } | NotificationsProtocol::Grandpa { .. } => {
+                32
+            }
         }
     }
 
@@ -4098,8 +4105,8 @@ where
                     a
                 })
             }
-            NotificationsProtocol::Transactions { .. } => Vec::new(),
-            NotificationsProtocol::Grandpa { chain_index } => {
+            NotificationsProtocol::Transactions { chain_index, .. }
+            | NotificationsProtocol::Grandpa { chain_index } => {
                 self.chains[chain_index].role.scale_encoding().to_vec()
             }
         };
@@ -4143,10 +4150,10 @@ pub enum GossipKind {
 }
 
 /// Error returned by [`ChainNetwork::add_chain`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum AddChainError {
     /// The genesis hash and fork id are identical to the ones of an existing chain.
-    #[display(fmt = "Genesis hash and fork id are identical to the ones of an existing chain.")]
+    #[display("Genesis hash and fork id are identical to the ones of an existing chain.")]
     Duplicate {
         /// Identifier of the chain that uses the same genesis hash and fork id.
         existing_identical: ChainId,
@@ -4154,7 +4161,7 @@ pub enum AddChainError {
 }
 
 /// Error returned by [`ChainNetwork::remove_chain`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum RemoveChainError {
     /// Chain is still in use.
     InUse,
@@ -4385,29 +4392,29 @@ pub enum Event<TConn> {
 
 /// See [`Event::ProtocolError`].
 // TODO: reexport these error types
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ProtocolError {
     /// Error in an incoming substream.
-    #[display(fmt = "Error in an incoming substream: {_0}")]
+    #[display("Error in an incoming substream: {_0}")]
     InboundError(InboundError),
     /// Error while decoding the handshake of the block announces substream.
-    #[display(fmt = "Error while decoding the handshake of the block announces substream: {_0}")]
+    #[display("Error while decoding the handshake of the block announces substream: {_0}")]
     BadBlockAnnouncesHandshake(BlockAnnouncesHandshakeDecodeError),
     /// Error while decoding a received block announce.
-    #[display(fmt = "Error while decoding a received block announce: {_0}")]
+    #[display("Error while decoding a received block announce: {_0}")]
     BadBlockAnnounce(codec::DecodeBlockAnnounceError),
     /// Error while decoding a received Grandpa notification.
-    #[display(fmt = "Error while decoding a received Grandpa notification: {_0}")]
+    #[display("Error while decoding a received Grandpa notification: {_0}")]
     BadGrandpaNotification(codec::DecodeGrandpaNotificationError),
     /// Received an invalid identify request.
     BadIdentifyRequest,
     /// Error while decoding a received blocks request.
-    #[display(fmt = "Error while decoding a received blocks request: {_0}")]
+    #[display("Error while decoding a received blocks request: {_0}")]
     BadBlocksRequest(codec::DecodeBlockRequestError),
 }
 
 /// Error potentially returned by [`ChainNetwork::gossip_open`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum OpenGossipError {
     /// No healthy established connection is available to open the link.
     NoConnection,
@@ -4416,21 +4423,21 @@ pub enum OpenGossipError {
 }
 
 /// Error potentially returned by [`ChainNetwork::gossip_close`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum CloseGossipError {
     /// There exists no outgoing nor ingoing attempt at a gossip link.
     NotOpen,
 }
 
 /// Error potentially returned when starting a request.
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum StartRequestError {
     /// There is no valid connection to the given peer on which the request can be started.
     NoConnection,
 }
 
 /// Error potentially returned when starting a request that might be too large.
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum StartRequestMaybeTooLargeError {
     /// There is no valid connection to the given peer on which the request can be started.
     NoConnection,
@@ -4460,33 +4467,33 @@ pub enum RequestResult {
 }
 
 /// Error returned by [`ChainNetwork::start_blocks_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum BlocksRequestError {
     /// Error while waiting for the response from the peer.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(RequestError),
     /// Error while decoding the response returned by the peer.
-    #[display(fmt = "Response decoding error: {_0}")]
+    #[display("Response decoding error: {_0}")]
     Decode(codec::DecodeBlockResponseError),
 }
 
 /// Error returned by [`ChainNetwork::start_storage_proof_request`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum StorageProofRequestError {
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(RequestError),
-    #[display(fmt = "Response decoding error: {_0}")]
+    #[display("Response decoding error: {_0}")]
     Decode(codec::DecodeStorageCallProofResponseError),
     /// The remote is incapable of answering this specific request.
     RemoteCouldntAnswer,
 }
 
 /// Error returned by [`ChainNetwork::start_call_proof_request`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum CallProofRequestError {
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(RequestError),
-    #[display(fmt = "Response decoding error: {_0}")]
+    #[display("Response decoding error: {_0}")]
     Decode(codec::DecodeStorageCallProofResponseError),
     /// The remote is incapable of answering this specific request.
     RemoteCouldntAnswer,
@@ -4505,36 +4512,36 @@ impl CallProofRequestError {
 }
 
 /// Error returned by [`ChainNetwork::start_grandpa_warp_sync_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum GrandpaWarpSyncRequestError {
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(RequestError),
-    #[display(fmt = "Response decoding error: {_0}")]
+    #[display("Response decoding error: {_0}")]
     Decode(codec::DecodeGrandpaWarpSyncResponseError),
 }
 
 /// Error returned by [`ChainNetwork::start_state_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum StateRequestError {
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(RequestError),
-    #[display(fmt = "Response decoding error: {_0}")]
+    #[display("Response decoding error: {_0}")]
     Decode(codec::DecodeStateResponseError),
 }
 
 /// Error during [`ChainNetwork::start_kademlia_find_node_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum KademliaFindNodeError {
     /// Error during the request.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     RequestFailed(RequestError),
     /// Failed to decode the response.
-    #[display(fmt = "Response decoding error: {_0}")]
+    #[display("Response decoding error: {_0}")]
     DecodeError(codec::DecodeFindNodeResponseError),
 }
 
 /// Error potentially returned when queueing a notification.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum QueueNotificationError {
     /// There is no valid substream to the given peer on which the notification can be sent.
     NoConnection,
@@ -4551,7 +4558,7 @@ pub struct EncodedBlockAnnounce {
 
 impl EncodedBlockAnnounce {
     /// Returns the decoded version of the announcement.
-    pub fn decode(&self) -> codec::BlockAnnounceRef {
+    pub fn decode(&'_ self) -> codec::BlockAnnounceRef<'_> {
         codec::decode_block_announce(&self.message, self.block_number_bytes).unwrap()
     }
 }
@@ -4595,7 +4602,7 @@ impl EncodedGrandpaWarpSyncResponse {
     }
 
     /// Returns the decoded version of the warp sync message.
-    pub fn decode(&self) -> codec::GrandpaWarpSyncResponse {
+    pub fn decode(&'_ self) -> codec::GrandpaWarpSyncResponse<'_> {
         match codec::decode_grandpa_warp_sync_response(&self.message, self.block_number_bytes) {
             Ok(msg) => msg,
             _ => unreachable!(),
@@ -4649,7 +4656,7 @@ pub struct EncodedBlockAnnounceHandshake {
 
 impl EncodedBlockAnnounceHandshake {
     /// Returns the decoded version of the handshake.
-    pub fn decode(&self) -> codec::BlockAnnouncesHandshakeRef {
+    pub fn decode(&'_ self) -> codec::BlockAnnouncesHandshakeRef<'_> {
         codec::decode_block_announces_handshake(self.block_number_bytes, &self.handshake).unwrap()
     }
 }
@@ -4661,15 +4668,15 @@ impl fmt::Debug for EncodedBlockAnnounceHandshake {
 }
 
 /// Error that can happen when trying to open an outbound block announces notifications substream.
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum GossipConnectError {
     /// Error in the underlying protocol.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Substream(NotificationsOutErr),
     /// Error decoding the block announces handshake.
     HandshakeDecode(BlockAnnouncesHandshakeDecodeError),
     /// Mismatch between the genesis hash of the remote and the local genesis hash.
-    #[display(fmt = "Mismatch between the genesis hash of the remote and the local genesis hash")]
+    #[display("Mismatch between the genesis hash of the remote and the local genesis hash")]
     GenesisMismatch {
         /// Hash of the genesis block of the chain according to the local node.
         local_genesis: [u8; 32],
@@ -4700,7 +4707,7 @@ impl EncodedGrandpaCommitMessage {
     }
 
     /// Returns the decoded version of the commit message.
-    pub fn decode(&self) -> codec::CommitMessageRef {
+    pub fn decode(&'_ self) -> codec::CommitMessageRef<'_> {
         match codec::decode_grandpa_notification(&self.message, self.block_number_bytes) {
             Ok(codec::GrandpaNotificationRef::Commit(msg)) => msg,
             _ => unreachable!(),

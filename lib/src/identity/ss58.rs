@@ -44,7 +44,7 @@ pub struct Decoded<P> {
 pub struct ChainPrefix(u16);
 
 impl fmt::Debug for ChainPrefix {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.0, f)
     }
 }
@@ -62,7 +62,7 @@ impl TryFrom<u16> for ChainPrefix {
 }
 
 /// Integer is too large to be a valid prefix
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub struct PrefixTooLargeError();
 
 impl From<u8> for ChainPrefix {
@@ -101,7 +101,7 @@ pub fn encode(decoded: Decoded<impl AsRef<[u8]>>) -> String {
 }
 
 /// Decodes an SS58 address from a string.
-pub fn decode(encoded: &'_ str) -> Result<Decoded<impl AsRef<[u8]>>, DecodeError> {
+pub fn decode(encoded: &str) -> Result<Decoded<impl AsRef<[u8]>>, DecodeError> {
     let mut bytes = bs58::decode(encoded)
         .into_vec()
         .map_err(|err| DecodeError::InvalidBs58(Bs58DecodeError(err)))?;
@@ -146,22 +146,23 @@ pub fn decode(encoded: &'_ str) -> Result<Decoded<impl AsRef<[u8]>>, DecodeError
 }
 
 /// Error while decoding an SS58 address.
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum DecodeError {
     /// SS58 is too short to possibly be valid.
     TooShort,
     /// Invalid SS58 prefix encoding.
     InvalidPrefix,
     /// Invalid BS58 format.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     InvalidBs58(Bs58DecodeError),
     /// Calculated checksum doesn't match the one provided.
     InvalidChecksum,
 }
 
 /// Error when decoding Base58 encoding.
-#[derive(Debug, Clone, derive_more::Display, derive_more::From)]
-pub struct Bs58DecodeError(bs58::decode::Error);
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error, derive_more::From)]
+// TODO: bs58 doesn't implement the Error trait; remove not(source) at some point
+pub struct Bs58DecodeError(#[error(not(source))] bs58::decode::Error);
 
 fn calculate_checksum(data: &[u8]) -> [u8; 2] {
     let mut hasher = blake2_rfc::blake2b::Blake2b::new(64);

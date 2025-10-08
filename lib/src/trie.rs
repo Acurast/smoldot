@@ -109,6 +109,7 @@ mod nibble;
 
 pub mod branch_search;
 pub mod calculate_root;
+pub mod minimize_proof;
 pub mod prefix_proof;
 pub mod proof_decode;
 pub mod proof_encode;
@@ -118,8 +119,8 @@ pub mod trie_structure;
 use alloc::collections::BTreeSet;
 
 pub use nibble::{
-    all_nibbles, bytes_to_nibbles, nibbles_to_bytes_prefix_extend, nibbles_to_bytes_suffix_extend,
-    nibbles_to_bytes_truncate, BytesToNibbles, Nibble, NibbleFromU8Error,
+    BytesToNibbles, Nibble, NibbleFromU8Error, all_nibbles, bytes_to_nibbles,
+    nibbles_to_bytes_prefix_extend, nibbles_to_bytes_suffix_extend, nibbles_to_bytes_truncate,
 };
 
 /// The format of the nodes of trie has two different versions.
@@ -274,10 +275,12 @@ pub fn ordered_root(
                 let key = value_req
                     .key()
                     .collect::<arrayvec::ArrayVec<u8, USIZE_COMPACT_BYTES>>();
-                let value = match nom::combinator::all_consuming(
-                    util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>,
-                )(&key)
-                {
+                let value = match nom::Parser::parse(
+                    &mut nom::combinator::all_consuming(
+                        util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>,
+                    ),
+                    &key,
+                ) {
                     Ok((_, key)) => entries.get(key).map(move |v| (v, version)),
                     Err(_) => None,
                 };
@@ -289,7 +292,7 @@ pub fn ordered_root(
 
 #[cfg(test)]
 mod tests {
-    use super::{trie_node, HashFunction};
+    use super::{HashFunction, trie_node};
     use core::iter;
 
     #[test]

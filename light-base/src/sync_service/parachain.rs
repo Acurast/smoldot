@@ -19,14 +19,9 @@ use super::ToBackground;
 use crate::{log, network_service, platform::PlatformRef, runtime_service, util};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
-use core::{
-    mem,
-    num::{NonZeroU32, NonZeroUsize},
-    pin::Pin,
-    time::Duration,
-};
+use core::{mem, num::NonZero, pin::Pin, time::Duration};
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream, StreamExt as _};
+use futures_util::{StreamExt as _, future, stream};
 use hashbrown::HashMap;
 use itertools::Itertools as _;
 use smoldot::{
@@ -66,7 +61,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 let relay_chain_sync = relay_chain_sync.clone();
                 Box::pin(async move {
                     relay_chain_sync
-                        .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
+                        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
                         .await
                 })
             },
@@ -195,7 +190,7 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: PlatformRef> {
     >,
 
     /// Future that is ready when we need to start a new parachain head fetch operation.
-    next_start_parahead_fetch: Pin<Box<dyn future::Future<Output = ()> + Send>>,
+    next_start_parahead_fetch: Pin<Box<dyn Future<Output = ()> + Send>>,
 }
 
 impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
@@ -338,7 +333,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         "relay-chain-new-subscription",
                         finalized_hash = HashDisplay(&header::hash_from_scale_encoded_header(
                             &relay_chain_subscribe_all.finalized_block_scale_encoded_header
-                        ))
+                        )),
+                        subscription_id = ?relay_chain_subscribe_all.new_blocks.id(),
                     );
                     log!(
                         &self.platform,
@@ -643,14 +639,6 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                     continue;
                                 }
 
-                                log!(
-                                    &self.platform,
-                                    Debug,
-                                    &self.log_target,
-                                    "subscriptions-notify-new-parablock",
-                                    hash = HashDisplay(&parahash)
-                                );
-
                                 if is_new_best {
                                     runtime_subscription.reported_best_parahead_hash =
                                         Some(parahash);
@@ -669,6 +657,16 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                                 .unwrap()
                                         })
                                         .unwrap_or(finalized_parahead),
+                                );
+
+                                log!(
+                                    &self.platform,
+                                    Debug,
+                                    &self.log_target,
+                                    "subscriptions-notify-new-parablock",
+                                    hash = HashDisplay(&parahash),
+                                    parent_hash = HashDisplay(&parent_hash),
+                                    ?is_new_best
                                 );
 
                                 // Elements in `all_subscriptions` are removed one by one and
@@ -876,7 +874,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             let relay_chain_sync = self.relay_chain_sync.clone();
                             Box::pin(async move {
                                 relay_chain_sync
-                                    .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
+                                    .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
                                     .await
                             })
                         },
@@ -948,7 +946,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             let relay_chain_sync = self.relay_chain_sync.clone();
                             Box::pin(async move {
                                 relay_chain_sync
-                                    .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
+                                    .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
                                     .await
                             })
                         },
@@ -1328,7 +1326,7 @@ async fn fetch_parahead<TPlat: PlatformRef>(
             }),
             6,
             Duration::from_secs(10),
-            NonZeroU32::new(2).unwrap(),
+            NonZero::<u32>::new(2).unwrap(),
         )
         .await
         .map_err(ParaheadError::RuntimeCall)?;
@@ -1346,10 +1344,10 @@ async fn fetch_parahead<TPlat: PlatformRef>(
 }
 
 /// Error that can happen when fetching the parachain head corresponding to a relay chain block.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 enum ParaheadError {
     /// Error while performing call request over the network.
-    #[display(fmt = "Error while performing call request over the network: {_0}")]
+    #[display("Error while performing call request over the network: {_0}")]
     RuntimeCall(runtime_service::RuntimeCallError),
     /// Error pinning the runtime of the block.
     PinRuntimeError(runtime_service::PinPinnedBlockRuntimeError),
@@ -1358,7 +1356,7 @@ enum ParaheadError {
     /// Error while decoding the output of the call.
     ///
     /// This indicates some kind of incompatibility between smoldot and the relay chain.
-    #[display(fmt = "Error while decoding the output of the call: {_0}")]
+    #[display("Error while decoding the output of the call: {_0}")]
     InvalidRuntimeOutput(para::Error),
 }
 

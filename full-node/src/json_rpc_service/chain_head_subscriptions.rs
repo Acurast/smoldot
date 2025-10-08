@@ -25,22 +25,18 @@ use smoldot::{
     json_rpc::{methods, service},
 };
 use std::{
-    future::Future,
-    num::NonZeroUsize,
+    num::NonZero,
     pin::{self, Pin},
     sync::Arc,
 };
 
-use crate::{consensus_service, database_thread, LogCallback};
+use crate::{consensus_service, database_thread};
 
 pub struct Config {
     /// Function that can be used to spawn background tasks.
     ///
     /// The tasks passed as parameter must be executed until they shut down.
     pub tasks_executor: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
-
-    /// Function called in order to notify of something.
-    pub log_callback: Arc<dyn LogCallback + Send + Sync>,
 
     /// Receiver for actions that the JSON-RPC client wants to perform.
     pub receiver: async_channel::Receiver<Message>,
@@ -80,7 +76,7 @@ pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
     tasks_executor(Box::pin(async move {
         let consensus_service_subscription = config
             .consensus_service
-            .subscribe_all(32, NonZeroUsize::new(32).unwrap())
+            .subscribe_all(32, NonZero::<usize>::new(32).unwrap())
             .await;
         let mut consensus_service_subscription_new_blocks =
             pin::pin!(consensus_service_subscription.new_blocks);
@@ -309,7 +305,7 @@ pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
     return_value
 }
 
-fn convert_runtime_spec(runtime: &executor::CoreVersion) -> methods::MaybeRuntimeSpec {
+fn convert_runtime_spec(runtime: &'_ executor::CoreVersion) -> methods::MaybeRuntimeSpec<'_> {
     let runtime = runtime.decode();
     methods::MaybeRuntimeSpec::Valid {
         spec: methods::RuntimeSpec {

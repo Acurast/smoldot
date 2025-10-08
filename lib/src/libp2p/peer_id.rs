@@ -79,8 +79,8 @@ impl PublicKey {
 
         // As indicated in the libp2p specification, the public key must be encoded
         // deterministically, and thus the fields are decoded deterministically in a precise order.
-        let mut parser = nom::combinator::all_consuming::<_, _, ErrorWrapper, _>(
-            nom::combinator::complete(nom::sequence::tuple((
+        let mut parser =
+            nom::combinator::all_consuming::<_, ErrorWrapper, _>(nom::combinator::complete((
                 nom::sequence::preceded(
                     nom::combinator::peek(nom::combinator::verify(
                         protobuf::tag_decode,
@@ -101,10 +101,9 @@ impl PublicKey {
                             .map_err(|_| FromProtobufEncodingError::BadEd25519Key)
                     }),
                 ),
-            ))),
-        );
+            )));
 
-        match nom::Finish::finish(parser(bytes)) {
+        match nom::Finish::finish(nom::Parser::parse(&mut parser, bytes)) {
             Ok((_, (1, key))) => Ok(PublicKey::Ed25519(key)),
             Ok((_, (_, _))) => Err(FromProtobufEncodingError::UnsupportedAlgorithm),
             Err(err) => Err(err.0),
@@ -132,7 +131,7 @@ impl PublicKey {
 }
 
 /// Error potentially returned by [`PublicKey::from_protobuf_encoding`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum FromProtobufEncodingError {
     /// Error decoding the Protobuf message.
     ProtobufDecodeError,
@@ -145,7 +144,7 @@ pub enum FromProtobufEncodingError {
 }
 
 /// Call to [`PublicKey::verify`] has failed. No reason is provided for security reasons.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub struct SignatureVerifyFailed();
 
 /// Public keys with byte-lengths smaller than `MAX_INLINE_KEY_LENGTH` will be
@@ -244,13 +243,13 @@ impl From<PublicKey> for PeerId {
 }
 
 impl fmt::Debug for PeerId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
 impl fmt::Display for PeerId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.to_base58().fmt(f)
     }
 }
@@ -314,31 +313,33 @@ impl FromStr for PeerId {
 }
 
 /// Error when turning bytes into a [`PeerId`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum FromBytesError {
     /// Failed to decode bytes into a multihash.
     DecodeError(multihash::FromBytesError),
     /// The algorithm used in the multihash isn't identity or SHA-256.
     InvalidMultihashAlgorithm,
     /// Multihash uses the identity algorithm, but the data isn't a valid public key.
-    #[display(fmt = "Failed to decode public key protobuf: {_0}")]
+    #[display("Failed to decode public key protobuf: {_0}")]
     InvalidPublicKey(FromProtobufEncodingError),
 }
 
 /// Error when parsing a string to a [`PeerId`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ParseError {
     /// Error decoding the Base58 encoding.
-    #[display(fmt = "Base58 decoding error: {_0}")]
+    #[display("Base58 decoding error: {_0}")]
     Bs58(Bs58DecodeError),
     /// Decoded bytes aren't a valid [`PeerId`].
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     NotPeerId(FromBytesError),
 }
 
 /// Error when decoding Base58 encoding.
-#[derive(Debug, derive_more::Display, derive_more::From)]
-pub struct Bs58DecodeError(bs58::decode::Error);
+#[derive(Debug, derive_more::Display, derive_more::Error, derive_more::From)]
+#[display("{_0}")]
+// TODO: bs58 doesn't implement the Error trait; remove not(source) at some point
+pub struct Bs58DecodeError(#[error(not(source))] bs58::decode::Error);
 
 #[cfg(test)]
 mod tests {

@@ -83,28 +83,28 @@ impl From<Nibble> for usize {
 }
 
 impl fmt::LowerHex for Nibble {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::LowerHex::fmt(&self.0, f)
     }
 }
 
 impl fmt::UpperHex for Nibble {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::UpperHex::fmt(&self.0, f)
     }
 }
 
 impl fmt::Debug for Nibble {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:x}", self.0)
     }
 }
 
 /// Error when building a [`Nibble`] from a `u8`.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum NibbleFromU8Error {
     /// The integer value is too large.
-    #[display(fmt = "Value is too large")]
+    #[display("Value is too large")]
     TooLarge,
 }
 
@@ -326,7 +326,7 @@ impl<I: ExactSizeIterator<Item = u8>> ExactSizeIterator for BytesToNibbles<I> {}
 
 #[cfg(test)]
 mod tests {
-    use super::{bytes_to_nibbles, Nibble, NibbleFromU8Error};
+    use super::{Nibble, NibbleFromU8Error, bytes_to_nibbles};
 
     #[test]
     fn nibble_try_from() {

@@ -29,14 +29,9 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::{
-    cmp, iter,
-    num::{NonZeroU32, NonZeroU64},
-    pin::Pin,
-    time::Duration,
-};
+use core::{cmp, iter, num::NonZero, pin::Pin, time::Duration};
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream, FutureExt as _, StreamExt as _};
+use futures_util::{FutureExt as _, StreamExt as _, future, stream};
 use hashbrown::HashMap;
 use smoldot::{
     chain, header,
@@ -74,7 +69,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 1024
             },
             max_disjoint_headers: 1024,
-            max_requests_per_block: NonZeroU32::new(3).unwrap(),
+            max_requests_per_block: NonZero::<u32>::new(3).unwrap(),
             download_ahead_blocks: {
                 // Verifying a block mostly consists in:
                 //
@@ -89,7 +84,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 // Assuming a maximum verification speed of 5k blocks/sec and a 95% latency of one
                 // second, the number of blocks to download ahead of time in order to not block
                 // is 5k.
-                NonZeroU32::new(5000).unwrap()
+                NonZero::<u32>::new(5000).unwrap()
             },
             download_bodies: false,
             download_all_chain_information_storage_proofs: false,
@@ -309,7 +304,10 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                                 &task.platform,
                                 Warn,
                                 &task.log_target,
-                                format!("Failed to build the chain information during warp syncing process: {}", error)
+                                format!(
+                                    "Failed to build the chain information during warp syncing process: {}",
+                                    error
+                                )
                             );
                         }
                     }
@@ -506,7 +504,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
             WakeUpReason::SyncProcess(all::ProcessOne::VerifyFinalityProof(verify)) => {
                 // Finality proof to verify.
-                let sender = verify.sender().1 .0.clone();
+                let sender = verify.sender().1.0.clone();
                 match verify.perform({
                     let mut seed = [0; 32];
                     task.platform.fill_random_bytes(&mut seed);
@@ -1165,7 +1163,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 // This constant corresponds to the maximum number of blocks that nodes will answer
                 // in one request. If this constant happens to be inaccurate, everything will still
                 // work but less efficiently.
-                let num_blocks = NonZeroU64::new(cmp::min(64, num_blocks.get())).unwrap();
+                let num_blocks = NonZero::<u64>::new(cmp::min(64, num_blocks.get())).unwrap();
 
                 let peer_id = sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
@@ -1173,7 +1171,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     peer_id,
                     network::codec::BlocksRequestConfig {
                         start: network::codec::BlocksRequestConfigStart::Hash(first_block_hash),
-                        desired_count: NonZeroU32::new(
+                        desired_count: NonZero::<u32>::new(
                             u32::try_from(num_blocks.get()).unwrap_or(u32::MAX),
                         )
                         .unwrap(),

@@ -20,7 +20,7 @@
 use alloc::{borrow::Cow, string::String};
 
 /// Parses a JSON-encoded RPC method call or notification.
-pub fn parse_request(request_json: &str) -> Result<Request, ParseError> {
+pub fn parse_request(request_json: &'_ str) -> Result<Request<'_>, ParseError> {
     let serde_request: SerdeRequest = serde_json::from_str(request_json).map_err(ParseError)?;
 
     if let Some(id) = &serde_request.id {
@@ -47,7 +47,7 @@ pub fn parse_request(request_json: &str) -> Result<Request, ParseError> {
 }
 
 /// Parses a JSON-encoded RPC response.
-pub fn parse_response(response_json: &str) -> Result<Response, ParseError> {
+pub fn parse_response(response_json: &'_ str) -> Result<Response<'_>, ParseError> {
     let error = match serde_json::from_str::<SerdeSuccess>(response_json) {
         Err(err) => err,
         Ok(SerdeSuccess {
@@ -216,7 +216,7 @@ impl<'a> Response<'a> {
 }
 
 /// Error while parsing a request.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub struct ParseError(serde_json::Error);
 
 /// Builds a JSON response.
@@ -621,10 +621,12 @@ mod tests {
 
     #[test]
     fn parse_response_missing_id() {
-        assert!(super::parse_response(
-            r#"{"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"} }"#
-        )
-        .is_err());
+        assert!(
+            super::parse_response(
+                r#"{"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"} }"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -675,6 +677,9 @@ mod tests {
     #[test]
     fn build_parse_error() {
         let response = super::build_parse_error_response();
-        assert_eq!(response, "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}");
+        assert_eq!(
+            response,
+            "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}"
+        );
     }
 }

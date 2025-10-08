@@ -29,9 +29,9 @@ pub(super) const ZSTD_PREFIX: [u8; 8] = [82, 188, 83, 118, 70, 219, 142, 5];
 ///
 /// The output data shall not be larger than `max_allowed`, to avoid potential zip bombs.
 pub(super) fn zstd_decode_if_necessary(
-    data: &[u8],
+    data: &'_ [u8],
     max_allowed: usize,
-) -> Result<Cow<[u8]>, Error> {
+) -> Result<Cow<'_, [u8]>, Error> {
     if data.starts_with(&ZSTD_PREFIX) {
         Ok(Cow::Owned(zstd_decode(
             &data[ZSTD_PREFIX.len()..],
@@ -48,12 +48,12 @@ pub(super) fn zstd_decode_if_necessary(
 ///
 /// The output data shall not be larger than `max_allowed`, to avoid potential zip bombs.
 fn zstd_decode(mut data: &[u8], max_allowed: usize) -> Result<Vec<u8>, Error> {
-    let mut decoder = ruzstd::frame_decoder::FrameDecoder::new();
+    let mut decoder = ruzstd::decoding::FrameDecoder::new();
     decoder.init(&mut data).map_err(|_| Error::InvalidZstd)?;
 
     match decoder.decode_blocks(
         &mut data,
-        ruzstd::frame_decoder::BlockDecodingStrategy::UptoBytes(max_allowed),
+        ruzstd::decoding::BlockDecodingStrategy::UptoBytes(max_allowed),
     ) {
         Ok(true) => {}
         Ok(false) => return Err(Error::TooLarge),
@@ -68,7 +68,7 @@ fn zstd_decode(mut data: &[u8], max_allowed: usize) -> Result<Vec<u8>, Error> {
 }
 
 /// Error possibly returned when decoding a zstd-compressed Wasm blob.
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum Error {
     /// The data is zstandard-compressed, but the data is in an invalid format.
     InvalidZstd,

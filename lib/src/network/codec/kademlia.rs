@@ -41,7 +41,7 @@ pub fn build_find_node_request(peer_id: &[u8]) -> Vec<u8> {
 pub fn decode_find_node_response(
     response_bytes: &[u8],
 ) -> Result<Vec<(peer_id::PeerId, Vec<Vec<u8>>)>, DecodeFindNodeResponseError> {
-    let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
+    let mut parser = nom::combinator::all_consuming::<_, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
             #[optional] response_ty = 1 => protobuf::enum_tag_decode,
             #[repeated(max = 1024)] peers = 8 => protobuf::message_tag_decode(protobuf::message_decode!{
@@ -51,13 +51,13 @@ pub fn decode_find_node_response(
         }),
     );
 
-    let closer_peers = match nom::Finish::finish(parser(response_bytes)) {
+    let closer_peers = match nom::Finish::finish(nom::Parser::parse(&mut parser, response_bytes)) {
         Ok((_, out)) if out.response_ty.unwrap_or(0) == 4 => out.peers,
         Ok((_, _)) => return Err(DecodeFindNodeResponseError::BadResponseTy),
         Err(_) => {
             return Err(DecodeFindNodeResponseError::ProtobufDecode(
                 ProtobufDecodeError,
-            ))
+            ));
         }
     };
 
@@ -78,18 +78,18 @@ pub fn decode_find_node_response(
 }
 
 /// Error potentially returned by [`decode_find_node_response`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum DecodeFindNodeResponseError {
     /// Error while decoding the Protobuf encoding.
-    #[display(fmt = "Error decoding the response: {_0}")]
+    #[display("Error decoding the response: {_0}")]
     ProtobufDecode(ProtobufDecodeError),
     /// Response isn't a response to a find node request.
     BadResponseTy,
     /// Error while parsing a [`peer_id::PeerId`] in the response.
-    #[display(fmt = "Invalid PeerId: {_0}")]
+    #[display("Invalid PeerId: {_0}")]
     BadPeerId(peer_id::FromBytesError),
 }
 
 /// Error while decoding the Protobuf encoding.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub struct ProtobufDecodeError;

@@ -90,9 +90,7 @@ pub struct BlockAnnounceRef<'a> {
 ///
 /// This function returns an iterator of buffers. The encoded message consists in the
 /// concatenation of the buffers.
-pub fn encode_block_announce(
-    announce: BlockAnnounceRef<'_>,
-) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+pub fn encode_block_announce(announce: BlockAnnounceRef) -> impl Iterator<Item = impl AsRef<[u8]>> {
     let is_best = if announce.is_best { [1u8] } else { [0u8] };
 
     [
@@ -105,12 +103,12 @@ pub fn encode_block_announce(
 
 /// Decodes a block announcement.
 pub fn decode_block_announce(
-    bytes: &[u8],
+    bytes: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<BlockAnnounceRef, DecodeBlockAnnounceError> {
-    let result: Result<_, nom::error::Error<_>> =
-        nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
-            nom::sequence::tuple((
+) -> Result<BlockAnnounceRef<'_>, DecodeBlockAnnounceError> {
+    let result: Result<_, nom::error::Error<_>> = nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
+            (
                 nom::combinator::recognize(|enc_hdr| {
                     match header::decode_partial(enc_hdr, block_number_bytes) {
                         Ok((hdr, rest)) => Ok((rest, hdr)),
@@ -121,17 +119,19 @@ pub fn decode_block_announce(
                     }
                 }),
                 nom::branch::alt((
-                    nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| false),
-                    nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| true),
+                    nom::combinator::map(nom::bytes::streaming::tag(&[0][..]), |_| false),
+                    nom::combinator::map(nom::bytes::streaming::tag(&[1][..]), |_| true),
                 )),
                 crate::util::nom_bytes_decode,
-            )),
+            ),
             |(scale_encoded_header, is_best, _)| BlockAnnounceRef {
                 scale_encoded_header,
                 is_best,
             },
-        )))(bytes)
-        .finish();
+        ))),
+        bytes,
+    )
+    .finish();
 
     match result {
         Ok((_, ann)) => Ok(ann),
@@ -140,18 +140,19 @@ pub fn decode_block_announce(
 }
 
 /// Error potentially returned by [`decode_block_announces_handshake`].
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Failed to decode a block announcement")]
-pub struct DecodeBlockAnnounceError(nom::error::ErrorKind);
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("Failed to decode a block announcement")]
+// TODO: nom doesn't implement the Error trait at the moment; remove error(not(source)) eventually
+pub struct DecodeBlockAnnounceError(#[error(not(source))] nom::error::ErrorKind);
 
 /// Turns a block announces handshake into its SCALE-encoding ready to be sent over the wire.
 ///
 /// This function returns an iterator of buffers. The encoded message consists in the
 /// concatenation of the buffers.
 pub fn encode_block_announces_handshake(
-    handshake: BlockAnnouncesHandshakeRef<'_>,
+    handshake: BlockAnnouncesHandshakeRef,
     block_number_bytes: usize,
-) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+) -> impl Iterator<Item = impl AsRef<[u8]>> {
     let mut header = vec![0; 1 + block_number_bytes];
     header[0] = handshake.role.scale_encoding()[0];
     // TODO: what to do if the best number doesn't fit in the given size? right now we just wrap around
@@ -168,28 +169,32 @@ pub fn encode_block_announces_handshake(
 /// Decodes a SCALE-encoded block announces handshake.
 pub fn decode_block_announces_handshake(
     expected_block_number_bytes: usize,
-    handshake: &[u8],
-) -> Result<BlockAnnouncesHandshakeRef, BlockAnnouncesHandshakeDecodeError> {
-    let result: Result<_, nom::error::Error<_>> =
-        nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
-            nom::sequence::tuple((
+    handshake: &'_ [u8],
+) -> Result<BlockAnnouncesHandshakeRef<'_>, BlockAnnouncesHandshakeDecodeError> {
+    let result: Result<_, nom::error::Error<_>> = nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
+            (
                 nom::branch::alt((
-                    nom::combinator::map(nom::bytes::streaming::tag(&[0b1]), |_| Role::Full),
-                    nom::combinator::map(nom::bytes::streaming::tag(&[0b10]), |_| Role::Light),
-                    nom::combinator::map(nom::bytes::streaming::tag(&[0b100]), |_| Role::Authority),
+                    nom::combinator::map(nom::bytes::streaming::tag(&[0b1][..]), |_| Role::Full),
+                    nom::combinator::map(nom::bytes::streaming::tag(&[0b10][..]), |_| Role::Light),
+                    nom::combinator::map(nom::bytes::streaming::tag(&[0b100][..]), |_| {
+                        Role::Authority
+                    }),
                 )),
                 crate::util::nom_varsize_number_decode_u64(expected_block_number_bytes),
                 nom::bytes::streaming::take(32u32),
                 nom::bytes::streaming::take(32u32),
-            )),
+            ),
             |(role, best_number, best_hash, genesis_hash)| BlockAnnouncesHandshakeRef {
                 role,
                 best_number,
                 best_hash: TryFrom::try_from(best_hash).unwrap(),
                 genesis_hash: TryFrom::try_from(genesis_hash).unwrap(),
             },
-        )))(handshake)
-        .finish();
+        ))),
+        handshake,
+    )
+    .finish();
 
     match result {
         Ok((_, hs)) => Ok(hs),
@@ -198,6 +203,7 @@ pub fn decode_block_announces_handshake(
 }
 
 /// Error potentially returned by [`decode_block_announces_handshake`].
-#[derive(Debug, Clone, derive_more::Display)]
-#[display(fmt = "Failed to decode a block announces handshake")]
-pub struct BlockAnnouncesHandshakeDecodeError(nom::error::ErrorKind);
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
+#[display("Failed to decode a block announces handshake")]
+// TODO: nom doesn't implement the Error trait at the moment; remove error(not(source)) eventually
+pub struct BlockAnnouncesHandshakeDecodeError(#[error(not(source))] nom::error::ErrorKind);

@@ -19,10 +19,10 @@ use hashbrown::HashMap;
 use smol::stream::StreamExt as _;
 use smoldot::{
     chain::fork_tree,
-    executor::{host::HostVmPrototype, CoreVersion},
+    executor::{CoreVersion, host::HostVmPrototype},
     trie,
 };
-use std::{collections::BTreeSet, iter, mem, num::NonZeroUsize, ops, pin::Pin, sync::Arc};
+use std::{collections::BTreeSet, iter, mem, num::NonZero, ops, pin::Pin, sync::Arc};
 
 use crate::{consensus_service, database_thread};
 
@@ -58,7 +58,7 @@ impl SubscribeAllHeads {
                 None => {
                     let subscribe_all = self
                         .consensus_service
-                        .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
+                        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
                         .await;
 
                     let blocks_to_unpin = iter::once(subscribe_all.finalized_block_hash)
@@ -137,7 +137,7 @@ impl SubscribeFinalizedHeads {
                 None => {
                     let subscribe_all = self
                         .consensus_service
-                        .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
+                        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
                         .await;
 
                     let mut pinned_blocks = HashMap::with_capacity(
@@ -248,7 +248,7 @@ impl SubscribeNewHeads {
             if self.subscription.is_none() {
                 let subscribe_all = self
                     .consensus_service
-                    .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
+                    .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
                     .await;
 
                 let mut pinned_blocks = HashMap::with_capacity(
@@ -413,7 +413,7 @@ impl SubscribeRuntimeVersion {
             if self.subscription.is_none() {
                 let subscribe_all = self
                     .consensus_service
-                    .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
+                    .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
                     .await;
 
                 let mut pinned_blocks = HashMap::with_capacity(
@@ -662,11 +662,8 @@ impl SubscribeStorage {
 
     /// Returns the next storage change notification.
     pub async fn next_storage_update(
-        &'_ mut self,
-    ) -> (
-        [u8; 32],
-        impl Iterator<Item = (Vec<u8>, Option<Vec<u8>>)> + '_,
-    ) {
+        &mut self,
+    ) -> ([u8; 32], impl Iterator<Item = (Vec<u8>, Option<Vec<u8>>)>) {
         'main_subscription: loop {
             // Get the active consensus service subscription, or subscribe if necessary.
             let subscription = match &mut self.subscription {
@@ -674,7 +671,7 @@ impl SubscribeStorage {
                 subscription @ None => {
                     let subscribe_all = self
                         .consensus_service
-                        .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
+                        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
                         .await;
 
                     let mut pinned_blocks_by_hash = HashMap::with_capacity(

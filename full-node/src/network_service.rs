@@ -27,9 +27,9 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::{database_thread, jaeger_service, LogCallback, LogLevel};
+use crate::{LogCallback, LogLevel, database_thread, jaeger_service};
 
-use core::{cmp, future::Future, mem, pin::Pin, task::Poll, time::Duration};
+use core::{cmp, mem, pin::Pin, task::Poll, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::stream::{self, SelectAll};
@@ -459,7 +459,9 @@ impl NetworkService {
                     }
                 } else {
                     // TODO: support WebSocket server
-                    return Err(InitError::BadListenMultiaddr(listen_address));
+                    return Err(InitError::BadListenMultiaddr {
+                        address: listen_address,
+                    });
                 }
             };
 
@@ -471,7 +473,7 @@ impl NetworkService {
                     loop {
                         match tcp_listener.accept().await {
                             Ok((socket, socket_addr)) => {
-                                break Some(((socket, socket_addr), tcp_listener))
+                                break Some(((socket, socket_addr), tcp_listener));
                             }
                             Err(error) => {
                                 // Errors here can happen if the accept failed, for example
@@ -801,33 +803,36 @@ impl NetworkService {
 }
 
 /// Error when initializing the network service.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum InitError {
     /// I/O error when initializing a listener.
-    #[display(fmt = "I/O error when creating listener for {_0}: {_1}")]
-    ListenerIo(Multiaddr, io::Error),
+    #[display("I/O error when creating listener for {_0}: {_1}")]
+    ListenerIo(Multiaddr, #[error(source)] io::Error),
     /// A listening address passed through the configuration isn't valid.
-    #[display(fmt = "A listening address passed through the configuration isn't valid: {_0}")]
-    BadListenMultiaddr(Multiaddr),
+    #[display("A listening address passed through the configuration isn't valid: {address}")]
+    BadListenMultiaddr {
+        /// The faulty address.
+        address: Multiaddr,
+    },
 }
 
 /// Error returned by [`NetworkService::blocks_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum BlocksRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(service::BlocksRequestError),
 }
 
 /// Error returned by [`NetworkService::warp_sync_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum WarpSyncRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(service::GrandpaWarpSyncRequestError),
 }
 
@@ -925,7 +930,7 @@ async fn background_task(mut inner: Inner) {
                                     break 'search WakeUpReason::CanAssignSlot(
                                         peer_id.clone(),
                                         chain_id,
-                                    )
+                                    );
                                 }
                                 basic_peering_strategy::AssignablePeer::AllPeersBanned {
                                     next_unban,

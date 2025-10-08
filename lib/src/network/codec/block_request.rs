@@ -18,7 +18,7 @@
 use crate::util::protobuf;
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::num::NonZeroU32;
+use core::num::NonZero;
 
 /// Description of a block request that can be sent to a peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +26,7 @@ pub struct BlocksRequestConfig {
     /// First block that the remote must return.
     pub start: BlocksRequestConfigStart,
     /// Number of blocks to request. The remote is free to return fewer blocks than requested.
-    pub desired_count: NonZeroU32,
+    pub desired_count: NonZero<u32>,
     /// Whether the first block should be the one with the highest number, of the one with the
     /// lowest number.
     pub direction: BlocksRequestDirection,
@@ -137,7 +137,7 @@ pub fn decode_block_request(
     expected_block_number_bytes: usize,
     request_bytes: &[u8],
 ) -> Result<BlocksRequestConfig, DecodeBlockRequestError> {
-    let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
+    let mut parser = nom::combinator::all_consuming::<_, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
             #[required] fields = 1 => protobuf::uint32_tag_decode,
             #[optional] hash = 2 => protobuf::bytes_tag_decode,
@@ -147,7 +147,7 @@ pub fn decode_block_request(
         }),
     );
 
-    let decoded = match nom::Finish::finish(parser(request_bytes)) {
+    let decoded = match nom::Finish::finish(nom::Parser::parse(&mut parser, request_bytes)) {
         Ok((_, rq)) => rq,
         Err(_) => return Err(DecodeBlockRequestError::ProtobufDecode),
     };
@@ -190,8 +190,8 @@ pub fn decode_block_request(
         },
         desired_count: {
             // A missing field or a `0` field are both interpreted as "no limit".
-            NonZeroU32::new(decoded.max_blocks.unwrap_or(u32::MAX))
-                .unwrap_or(NonZeroU32::new(u32::MAX).unwrap())
+            NonZero::<u32>::new(decoded.max_blocks.unwrap_or(u32::MAX))
+                .unwrap_or(NonZero::<u32>::new(u32::MAX).unwrap())
         },
         direction: match decoded.direction {
             None | Some(0) => BlocksRequestDirection::Ascending,
@@ -275,7 +275,7 @@ pub fn build_block_response(response: Vec<BlockData>) -> impl Iterator<Item = im
 pub fn decode_block_response(
     response_bytes: &[u8],
 ) -> Result<Vec<BlockData>, DecodeBlockResponseError> {
-    let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
+    let mut parser = nom::combinator::all_consuming::<_, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
             #[repeated(max = 32768)] blocks = 1 => protobuf::message_tag_decode(protobuf::message_decode!{
                 #[required] hash = 1 => protobuf::bytes_tag_decode,
@@ -286,7 +286,7 @@ pub fn decode_block_response(
         }),
     );
 
-    let blocks = match nom::Finish::finish(parser(response_bytes)) {
+    let blocks = match nom::Finish::finish(nom::Parser::parse(&mut parser, response_bytes)) {
         Ok((_, out)) => out.blocks,
         Err(_) => return Err(DecodeBlockResponseError::ProtobufDecode),
     };
@@ -303,13 +303,16 @@ pub fn decode_block_response(
             // TODO: no; we might not have asked for the body
             body: Some(block.body.into_iter().map(|tx| tx.to_vec()).collect()),
             justifications: if let Some(justifications) = block.justifications {
-                let result: nom::IResult<_, _> = nom::combinator::all_consuming(
-                    nom::combinator::complete(decode_justifications),
-                )(justifications);
+                let result: nom::IResult<_, _> = nom::Parser::parse(
+                    &mut nom::combinator::all_consuming(nom::combinator::complete(
+                        decode_justifications,
+                    )),
+                    justifications,
+                );
                 match result {
                     Ok((_, out)) => Some(out),
                     Err(nom::Err::Error(_) | nom::Err::Failure(_)) => {
-                        return Err(DecodeBlockResponseError::InvalidJustifications)
+                        return Err(DecodeBlockResponseError::InvalidJustifications);
                     }
                     Err(_) => unreachable!(),
                 }
@@ -365,7 +368,7 @@ pub struct Justification {
 }
 
 /// Error potentially returned by [`decode_block_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum DecodeBlockRequestError {
     /// Error while decoding the Protobuf encoding.
     ProtobufDecode,
@@ -384,7 +387,7 @@ pub enum DecodeBlockRequestError {
 }
 
 /// Error potentially returned by [`decode_block_response`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum DecodeBlockResponseError {
     /// Error while decoding the Protobuf encoding.
     ProtobufDecode,
@@ -398,22 +401,25 @@ pub enum DecodeBlockResponseError {
 fn decode_justifications<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], Vec<Justification>, E> {
-    nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-        nom::multi::many_m_n(
-            num_elems,
-            num_elems,
-            nom::combinator::map(
-                nom::sequence::tuple((
-                    nom::bytes::streaming::take(4u32),
-                    crate::util::nom_bytes_decode,
-                )),
-                move |(consensus_engine, justification)| Justification {
-                    engine_id: <[u8; 4]>::try_from(consensus_engine).unwrap(),
-                    justification: justification.to_owned(),
-                },
-            ),
-        )
-    })(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
+            nom::multi::many_m_n(
+                num_elems,
+                num_elems,
+                nom::combinator::map(
+                    (
+                        nom::bytes::streaming::take(4u32),
+                        crate::util::nom_bytes_decode,
+                    ),
+                    move |(consensus_engine, justification)| Justification {
+                        engine_id: <[u8; 4]>::try_from(consensus_engine).unwrap(),
+                        justification: justification.to_owned(),
+                    },
+                ),
+            )
+        }),
+        bytes,
+    )
 }
 
 #[cfg(test)]

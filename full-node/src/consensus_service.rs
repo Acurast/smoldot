@@ -24,15 +24,13 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::{database_thread, jaeger_service, network_service, LogCallback, LogLevel};
+use crate::{LogCallback, LogLevel, database_thread, jaeger_service, network_service};
 
-use core::num::NonZeroU32;
 use futures_channel::{mpsc, oneshot};
 use futures_lite::FutureExt as _;
 use futures_util::{
-    future,
+    SinkExt as _, StreamExt as _, future,
     stream::{self, FuturesUnordered},
-    SinkExt as _, StreamExt as _,
 };
 use hashbrown::HashSet;
 use rand::seq::IteratorRandom;
@@ -53,10 +51,8 @@ use smoldot::{
 use std::{
     array,
     borrow::Cow,
-    cmp,
-    future::Future,
-    iter,
-    num::{NonZeroU64, NonZeroUsize},
+    cmp, iter,
+    num::NonZero,
     pin::Pin,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
@@ -118,10 +114,6 @@ pub struct Config {
     pub slot_duration_author_ratio: u16,
 }
 
-/// Identifier for a blocks request to be performed.
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub struct BlocksRequestId(usize);
-
 /// Summary of the state of the [`ConsensusService`].
 #[derive(Debug, Clone)]
 pub struct SyncState {
@@ -145,7 +137,7 @@ enum ToBackground {
     SubscribeAll {
         buffer_size: usize,
         // TODO: unused field
-        _max_finalized_pinned_blocks: NonZeroUsize,
+        _max_finalized_pinned_blocks: NonZero<usize>,
         result_tx: oneshot::Sender<SubscribeAll>,
     },
     GetSyncState {
@@ -166,7 +158,7 @@ enum ToBackground {
 }
 
 /// Potential error when calling [`ConsensusService::new`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum InitError {
     /// Database is corrupted.
     DatabaseCorruption(full_sqlite::CorruptedError),
@@ -228,7 +220,7 @@ impl ConsensusService {
                         match database.to_chain_information(&finalized_block_hash) {
                             Ok(info) => info,
                             Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
-                                return Err(InitError::DatabaseCorruption(err))
+                                return Err(InitError::DatabaseCorruption(err));
                             }
                             Err(full_sqlite::StorageAccessError::IncompleteStorage)
                             | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
@@ -241,7 +233,7 @@ impl ConsensusService {
                         Ok(Some((code, _))) => code,
                         Ok(None) => return Err(InitError::FinalizedCodeMissing),
                         Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
-                            return Err(InitError::DatabaseCorruption(err))
+                            return Err(InitError::DatabaseCorruption(err));
                         }
                         Err(full_sqlite::StorageAccessError::IncompleteStorage)
                         | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
@@ -254,7 +246,7 @@ impl ConsensusService {
                         Ok(Some((hp, _))) => Some(hp),
                         Ok(None) => None,
                         Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
-                            return Err(InitError::DatabaseCorruption(err))
+                            return Err(InitError::DatabaseCorruption(err));
                         }
                         Err(full_sqlite::StorageAccessError::IncompleteStorage)
                         | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
@@ -302,14 +294,14 @@ impl ConsensusService {
                 1024
             },
             max_disjoint_headers: 1024,
-            max_requests_per_block: NonZeroU32::new(3).unwrap(),
+            max_requests_per_block: NonZero::<u32>::new(3).unwrap(),
             download_ahead_blocks: {
                 // Assuming a verification speed of 1k blocks/sec and a 99th download time
                 // percentile of two second, the number of blocks to download ahead of time
                 // in order to not block is 2000.
                 // In practice, however, the verification speed and download speed depend on
                 // the chain and the machine of the user.
-                NonZeroU32::new(2000).unwrap()
+                NonZero::<u32>::new(2000).unwrap()
             },
             download_bodies: true,
             // We ask for all the chain-information-related storage proofs and call proofs to be
@@ -416,7 +408,7 @@ impl ConsensusService {
     pub async fn subscribe_all(
         &self,
         buffer_size: usize,
-        max_finalized_pinned_blocks: NonZeroUsize,
+        max_finalized_pinned_blocks: NonZero<usize>,
     ) -> SubscribeAll {
         let (result_tx, result_rx) = oneshot::channel();
         let _ = self
@@ -1139,23 +1131,25 @@ impl SyncBackground {
                                     request: all::DesiredRequest::StorageGetMerkleProof {
                                         block_hash: missing_item.hash,
                                         state_trie_root: [0; 32], // TODO: wrong, but field value unused so it's fine temporarily
-                                        keys: vec![trie::nibbles_to_bytes_suffix_extend(
-                                            missing_item
-                                                .trie_node_key_nibbles
-                                                .into_iter()
-                                                // In order to download more than one item at a time,
-                                                // we add some randomly-generated nibbles to the
-                                                // requested key. The request will target the missing
-                                                // key plus a few other random keys.
-                                                .chain((0..32).map(|_| {
-                                                    rand::Rng::gen_range(
-                                                        &mut rand::thread_rng(),
-                                                        0..16,
-                                                    )
-                                                }))
-                                                .map(|n| trie::Nibble::try_from(n).unwrap()),
-                                        )
-                                        .collect::<Vec<_>>()],
+                                        keys: vec![
+                                            trie::nibbles_to_bytes_suffix_extend(
+                                                missing_item
+                                                    .trie_node_key_nibbles
+                                                    .into_iter()
+                                                    // In order to download more than one item at a time,
+                                                    // we add some randomly-generated nibbles to the
+                                                    // requested key. The request will target the missing
+                                                    // key plus a few other random keys.
+                                                    .chain((0..32).map(|_| {
+                                                        rand::Rng::gen_range(
+                                                            &mut rand::thread_rng(),
+                                                            0..16,
+                                                        )
+                                                    }))
+                                                    .map(|n| trie::Nibble::try_from(n).unwrap()),
+                                            )
+                                            .collect::<Vec<_>>(),
+                                        ],
                                     },
                                     database_catch_up_type: DbCatchUpType::Database,
                                 };
@@ -1500,7 +1494,7 @@ impl SyncBackground {
                 } => {
                     // Before notifying the syncing of the request, clamp the number of blocks to
                     // the number of blocks we expect to receive.
-                    let num_blocks = NonZeroU64::new(cmp::min(num_blocks.get(), 64)).unwrap();
+                    let num_blocks = NonZero::<u64>::new(cmp::min(num_blocks.get(), 64)).unwrap();
 
                     let peer_id = {
                         let info = self.sync[source_id].clone().unwrap();
@@ -1516,7 +1510,7 @@ impl SyncBackground {
                         self.network_chain_id,
                         network::codec::BlocksRequestConfig {
                             start: network::codec::BlocksRequestConfigStart::Hash(first_block_hash),
-                            desired_count: NonZeroU32::new(
+                            desired_count: NonZero::<u32>::new(
                                 u32::try_from(num_blocks.get()).unwrap_or(u32::MAX),
                             )
                             .unwrap(),
@@ -3043,12 +3037,12 @@ pub async fn execute_block_and_insert(
             Err(RuntimeCallError::RuntimeStartError(error)) => {
                 return Err(ExecuteBlockError::VerificationFailure(
                     ExecuteBlockVerificationFailureError::RuntimeStartError(error),
-                ))
+                ));
             }
             Err(RuntimeCallError::RuntimeExecutionError(error)) => {
                 return Err(ExecuteBlockError::InvalidBlock(
                     ExecuteBlockInvalidBlockError::RuntimeExecutionError(error),
-                ))
+                ));
             }
             Err(RuntimeCallError::DatabaseParentAccess(error)) => {
                 return Err(ExecuteBlockError::VerificationFailure(
@@ -3059,17 +3053,17 @@ pub async fn execute_block_and_insert(
                             parameter: call_parameter.to_owned(),
                         },
                     },
-                ))
+                ));
             }
             Err(RuntimeCallError::ForbiddenHostFunction) => {
                 return Err(ExecuteBlockError::VerificationFailure(
                     ExecuteBlockVerificationFailureError::ForbiddenHostFunction,
-                ))
+                ));
             }
             Err(RuntimeCallError::DatabaseInvalidStateTrieVersion) => {
                 return Err(ExecuteBlockError::VerificationFailure(
                     ExecuteBlockVerificationFailureError::DatabaseInvalidStateTrieVersion,
-                ))
+                ));
             }
         }
     }
@@ -3087,7 +3081,7 @@ pub async fn execute_block_and_insert(
                 Some(None) => {
                     return Err(ExecuteBlockError::InvalidBlock(
                         ExecuteBlockInvalidBlockError::EmptyCode,
-                    ))
+                    ));
                 }
                 None => {
                     let parent_block_hash = *parent_block_hash;
@@ -3105,7 +3099,7 @@ pub async fn execute_block_and_insert(
                         Ok(None) => {
                             return Err(ExecuteBlockError::VerificationFailure(
                                 ExecuteBlockVerificationFailureError::ParentCodeEmptyInDatabase,
-                            ))
+                            ));
                         }
                         Err(error) => return Err(ExecuteBlockError::VerificationFailure(
                             ExecuteBlockVerificationFailureError::DatabaseParentAccess {
@@ -3282,7 +3276,7 @@ pub struct ExecuteBlockSuccess {
 }
 
 /// Error returned by [`execute_block_and_insert`].
-#[derive(Debug, derive_more::Display, derive_more::From)]
+#[derive(Debug, derive_more::Display, derive_more::Error, derive_more::From)]
 pub enum ExecuteBlockError {
     /// Failed to verify block.
     VerificationFailure(ExecuteBlockVerificationFailureError),
@@ -3291,14 +3285,15 @@ pub enum ExecuteBlockError {
 }
 
 /// See [`ExecuteBlockError::VerificationFailure`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ExecuteBlockVerificationFailureError {
     /// Error starting the runtime execution.
     RuntimeStartError(executor::host::StartErr),
     /// Error while accessing the parent block in the database.
-    #[display(fmt = "Error while accessing the parent block in the database: {error}")]
+    #[display("Error while accessing the parent block in the database: {error}")]
     DatabaseParentAccess {
         /// Error that happened.
+        #[error(source)]
         error: full_sqlite::StorageAccessError,
         /// In which context the error hapened.
         context: ExecuteBlockDatabaseAccessFailureContext,
@@ -3328,15 +3323,15 @@ pub enum ExecuteBlockDatabaseAccessFailureContext {
 }
 
 /// See [`ExecuteBlockError::InvalidBlock`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ExecuteBlockInvalidBlockError {
     /// Error while executing the runtime.
     RuntimeExecutionError(runtime_call::ErrorDetail),
     /// Error in the output of `BlockBuilder_check_inherents`.
-    #[display(fmt = "Error in the output of BlockBuilder_check_inherents: {_0}")]
+    #[display("Error in the output of BlockBuilder_check_inherents: {_0}")]
     CheckInherentsOutputError(body_only::InherentsOutputError),
     /// Error in the output of `Core_execute_block`.
-    #[display(fmt = "Error in the output of Core_execute_block: {_0}")]
+    #[display("Error in the output of Core_execute_block: {_0}")]
     ExecuteBlockOutputError(body_only::ExecuteBlockOutputError),
     /// The new `:code` after the execution is empty.
     EmptyCode,
@@ -3531,16 +3526,16 @@ pub struct RuntimeCallSuccess {
 }
 
 /// Error returned by [`runtime_call()`].
-#[derive(Debug, derive_more::Display, derive_more::From)]
+#[derive(Debug, derive_more::Display, derive_more::Error, derive_more::From)]
 pub enum RuntimeCallError {
     /// Error starting the runtime execution.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     RuntimeStartError(executor::host::StartErr),
     /// Error while executing the runtime.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     RuntimeExecutionError(runtime_call::ErrorDetail),
     /// Error while accessing the parent block in the database.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     DatabaseParentAccess(full_sqlite::StorageAccessError),
     /// State trie version stored in database is invalid.
     DatabaseInvalidStateTrieVersion,

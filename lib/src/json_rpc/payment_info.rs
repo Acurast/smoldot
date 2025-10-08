@@ -18,9 +18,7 @@
 use super::methods;
 
 /// Produces the input to pass to the `TransactionPaymentApi_query_info` runtime call.
-pub fn payment_info_parameters(
-    extrinsic: &'_ [u8],
-) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + Clone + '_ {
+pub fn payment_info_parameters(extrinsic: &[u8]) -> impl Iterator<Item = impl AsRef<[u8]>> + Clone {
     [
         either::Left(extrinsic),
         either::Right(u32::try_from(extrinsic.len()).unwrap().to_le_bytes()),
@@ -36,7 +34,7 @@ pub const PAYMENT_FEES_FUNCTION_NAME: &str = "TransactionPaymentApi_query_info";
 /// Must be passed the version of the `TransactionPaymentApi` API, according to the runtime
 /// specification.
 pub fn decode_payment_info(
-    scale_encoded: &'_ [u8],
+    scale_encoded: &[u8],
     api_version: u32,
 ) -> Result<methods::RuntimeDispatchInfo, DecodeError> {
     let is_api_v2 = match api_version {
@@ -45,17 +43,19 @@ pub fn decode_payment_info(
         _ => return Err(DecodeError::UnknownRuntimeVersion),
     };
 
-    match nom::combinator::all_consuming(nom_decode_payment_info::<nom::error::Error<&'_ [u8]>>(
-        is_api_v2,
-    ))(scale_encoded)
-    {
+    match nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom_decode_payment_info::<nom::error::Error<&[u8]>>(
+            is_api_v2,
+        )),
+        scale_encoded,
+    ) {
         Ok((_, info)) => Ok(info),
         Err(_) => Err(DecodeError::ParseError),
     }
 }
 
 /// Potential error when decoding payment information runtime output.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum DecodeError {
     /// Failed to parse the return value of `TransactionPaymentApi_query_info`.
     ParseError,
@@ -65,20 +65,23 @@ pub enum DecodeError {
 
 fn nom_decode_payment_info<'a, E: nom::error::ParseError<&'a [u8]>>(
     is_api_v2: bool,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], methods::RuntimeDispatchInfo, E> {
+) -> impl nom::Parser<&'a [u8], Output = methods::RuntimeDispatchInfo, Error = E> {
     nom::combinator::map(
-        nom::sequence::tuple((
+        (
             move |bytes| {
                 if is_api_v2 {
                     nom::number::streaming::le_u64(bytes)
                 } else {
-                    nom::combinator::map(
-                        nom::sequence::tuple((
-                            crate::util::nom_scale_compact_u64,
-                            crate::util::nom_scale_compact_u64,
-                        )),
-                        |(ref_time, _proof_size)| ref_time,
-                    )(bytes)
+                    nom::Parser::parse(
+                        &mut nom::combinator::map(
+                            (
+                                crate::util::nom_scale_compact_u64,
+                                crate::util::nom_scale_compact_u64,
+                            ),
+                            |(ref_time, _proof_size)| ref_time,
+                        ),
+                        bytes,
+                    )
                 }
             },
             nom::combinator::map_opt(nom::number::streaming::u8, |n| match n {
@@ -125,7 +128,7 @@ fn nom_decode_payment_info<'a, E: nom::error::ParseError<&'a [u8]>>(
 
                 Ok((&[][..], num))
             },
-        )),
+        ),
         |(weight, class, partial_fee)| methods::RuntimeDispatchInfo {
             weight,
             class,

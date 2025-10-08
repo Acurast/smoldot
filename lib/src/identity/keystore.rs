@@ -41,7 +41,6 @@
 //! >           This keystore, being newly-written, doesn't have to follow them.
 
 #![cfg(feature = "std")]
-#![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 use crate::{identity::seed_phrase, util::SipHasherBuild};
 
@@ -149,42 +148,41 @@ impl Keystore {
                     Err(_) => continue,
                 };
 
-                let mut parser =
-                    nom::combinator::all_consuming::<_, _, (&str, nom::error::ErrorKind), _>(
-                        nom::combinator::complete(nom::sequence::tuple((
-                            nom::combinator::map_opt(
-                                nom::bytes::streaming::take(4u32),
-                                KeyNamespace::from_string,
-                            ),
-                            nom::bytes::streaming::tag("-"),
-                            nom::combinator::map_opt(
-                                nom::bytes::streaming::take(7u32),
-                                |b| match b {
-                                    "ed25519" => Some(PrivateKey::FileEd25519),
-                                    "sr25519" => Some(PrivateKey::FileSr25519),
-                                    _ => None,
-                                },
-                            ),
-                            nom::bytes::streaming::tag("-"),
-                            nom::combinator::map_opt(
-                                nom::bytes::complete::take_while(|c: char| {
-                                    c.is_ascii_digit() || ('a'..='f').contains(&c)
-                                }),
-                                |k: &str| {
-                                    if k.len() == 64 {
-                                        Some(<[u8; 32]>::try_from(hex::decode(k).unwrap()).unwrap())
-                                    } else {
-                                        None
-                                    }
-                                },
-                            ),
-                        ))),
-                    );
+                let mut parser = nom::combinator::all_consuming::<
+                    _,
+                    (&str, nom::error::ErrorKind),
+                    _,
+                >(nom::combinator::complete((
+                    nom::combinator::map_opt(
+                        nom::bytes::streaming::take(4u32),
+                        KeyNamespace::from_string,
+                    ),
+                    nom::bytes::streaming::tag("-"),
+                    nom::combinator::map_opt(nom::bytes::streaming::take(7u32), |b| match b {
+                        "ed25519" => Some(PrivateKey::FileEd25519),
+                        "sr25519" => Some(PrivateKey::FileSr25519),
+                        _ => None,
+                    }),
+                    nom::bytes::streaming::tag("-"),
+                    nom::combinator::map_opt(
+                        nom::bytes::complete::take_while(|c: char| {
+                            c.is_ascii_digit() || ('a'..='f').contains(&c)
+                        }),
+                        |k: &str| {
+                            if k.len() == 64 {
+                                Some(<[u8; 32]>::try_from(hex::decode(k).unwrap()).unwrap())
+                            } else {
+                                None
+                            }
+                        },
+                    ),
+                )));
 
-                let (namespace, _, algorithm, _, public_key) = match parser(&file_name) {
-                    Ok((_, v)) => v,
-                    Err(_) => continue,
-                };
+                let (namespace, _, algorithm, _, public_key) =
+                    match nom::Parser::parse(&mut parser, &file_name) {
+                        Ok((_, v)) => v,
+                        Err(_) => continue,
+                    };
 
                 // Make sure that the content of the file is valid and that it corresponds to
                 // the public key advertised in the file name.
@@ -429,7 +427,7 @@ impl Keystore {
         public_key: &'a [u8; 32],
         label: &'static [u8],
         transcript_items: impl Iterator<Item = (&'static [u8], either::Either<&'a [u8], u64>)> + 'a,
-    ) -> impl core::future::Future<Output = Result<VrfSignature, SignVrfError>> + 'a {
+    ) -> impl Future<Output = Result<VrfSignature, SignVrfError>> {
         async move {
             let mut guarded = self.guarded.lock().await;
             let key = guarded
@@ -612,7 +610,7 @@ pub struct VrfSignature {
     pub proof: [u8; 64],
 }
 
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum SignError {
     /// The given `(namespace, public key)` combination is unknown to this keystore.
     UnknownPublicKey,
@@ -620,25 +618,25 @@ pub enum SignError {
     /// Error while accessing the file containing the secret key.
     /// Typically indicates the content of the file has been modified by something else than
     /// the keystore.
-    #[display(fmt = "Error loading the secret key; {_0}")]
+    #[display("Error loading the secret key; {_0}")]
     KeyLoad(KeyLoadError),
 }
 
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum KeyLoadError {
     /// Error reported by the operating system.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Io(io::Error),
     /// Content of the file is invalid. Contains a human-readable error message as a string.
     /// Because the format of the content of the file is an implementation detail, no detail is
     /// provided.
-    #[display(fmt = "{_0}")]
-    BadFormat(String),
+    #[display("{_0}")]
+    BadFormat(#[error(not(source))] String),
 }
 
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum SignVrfError {
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Sign(SignError),
     WrongKeyAlgorithm,
 }
@@ -693,10 +691,12 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(ed25519_zebra::VerificationKey::try_from(public_key)
-                .unwrap()
-                .verify(&ed25519_zebra::Signature::from(signature), b"hello world")
-                .is_ok());
+            assert!(
+                ed25519_zebra::VerificationKey::try_from(public_key)
+                    .unwrap()
+                    .verify(&ed25519_zebra::Signature::from(signature), b"hello world")
+                    .is_ok()
+            );
         });
     }
 
@@ -727,14 +727,16 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(schnorrkel::PublicKey::from_bytes(&public_key)
-                .unwrap()
-                .verify_simple(
-                    b"substrate",
-                    b"hello world",
-                    &schnorrkel::Signature::from_bytes(&signature).unwrap()
-                )
-                .is_ok());
+            assert!(
+                schnorrkel::PublicKey::from_bytes(&public_key)
+                    .unwrap()
+                    .verify_simple(
+                        b"substrate",
+                        b"hello world",
+                        &schnorrkel::Signature::from_bytes(&signature).unwrap()
+                    )
+                    .is_ok()
+            );
         });
     }
 }
