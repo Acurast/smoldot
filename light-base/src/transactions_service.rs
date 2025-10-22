@@ -650,6 +650,11 @@ async fn background_task<TPlat: PlatformRef>(
                 let (tx_id, _, error) = match worker
                     .pending_transactions
                     .invalid_transactions_finalized_block()
+                    .chain(
+                        worker
+                            .pending_transactions
+                            .invalid_transactions_best_block(),
+                    )
                     .next()
                 {
                     Some(v) => v,
@@ -1430,10 +1435,12 @@ impl<TPlat: PlatformRef> PendingTransaction<TPlat> {
     }
 
     fn update_status(&mut self, status: TransactionStatus) {
-        for n in 0..self.status_update.len() {
-            let channel = self.status_update.swap_remove(n);
-            if channel.try_send(status.clone()).is_ok() {
-                self.status_update.push(channel);
+        let mut i = 0;
+        while i < self.status_update.len() {
+            if self.status_update[i].try_send(status.clone()).is_ok() {
+                i += 1;
+            } else {
+                self.status_update.swap_remove(i);
             }
         }
 
