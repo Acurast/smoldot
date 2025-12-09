@@ -47,19 +47,20 @@ pub fn multiaddr_to_address(
     let proto2 = iter.next().ok_or(Error::UnknownCombination)?;
     let proto3 = iter.next();
     let proto4 = iter.next();
+    let proto5 = iter.next();
 
     if iter.next().is_some() {
         return Err(Error::UnknownCombination);
     }
 
-    Ok(match (proto1, proto2, proto3, proto4) {
-        (Protocol::Ip4(ip), Protocol::Tcp(port), None, None) => {
+    Ok(match (proto1, proto2, proto3, proto4, proto5) {
+        (Protocol::Ip4(ip), Protocol::Tcp(port), Some(Protocol::P2p(_)) | None, None, None) => {
             AddressOrMultiStreamAddress::Address(Address::TcpIp {
                 ip: IpAddr::V4(Ipv4Addr::from(ip)),
                 port,
             })
         }
-        (Protocol::Ip6(ip), Protocol::Tcp(port), None, None) => {
+        (Protocol::Ip6(ip), Protocol::Tcp(port), Some(Protocol::P2p(_)) | None, None, None) => {
             AddressOrMultiStreamAddress::Address(Address::TcpIp {
                 ip: IpAddr::V6(Ipv6Addr::from(ip)),
                 port,
@@ -68,19 +69,20 @@ pub fn multiaddr_to_address(
         (
             Protocol::Dns(addr) | Protocol::Dns4(addr) | Protocol::Dns6(addr),
             Protocol::Tcp(port),
+            Some(Protocol::P2p(_)) | None,
             None,
             None,
         ) => AddressOrMultiStreamAddress::Address(Address::TcpDns {
             hostname: str::from_utf8(addr.into_bytes()).map_err(Error::NonUtf8DomainName)?,
             port,
         }),
-        (Protocol::Ip4(ip), Protocol::Tcp(port), Some(Protocol::Ws), None) => {
+        (Protocol::Ip4(ip), Protocol::Tcp(port), Some(Protocol::Ws), Some(Protocol::P2p(_)) | None, None) => {
             AddressOrMultiStreamAddress::Address(Address::WebSocketIp {
                 ip: IpAddr::V4(Ipv4Addr::from(ip)),
                 port,
             })
         }
-        (Protocol::Ip6(ip), Protocol::Tcp(port), Some(Protocol::Ws), None) => {
+        (Protocol::Ip6(ip), Protocol::Tcp(port), Some(Protocol::Ws), Some(Protocol::P2p(_)) | None, None) => {
             AddressOrMultiStreamAddress::Address(Address::WebSocketIp {
                 ip: IpAddr::V6(Ipv6Addr::from(ip)),
                 port,
@@ -90,6 +92,7 @@ pub fn multiaddr_to_address(
             Protocol::Dns(addr) | Protocol::Dns4(addr) | Protocol::Dns6(addr),
             Protocol::Tcp(port),
             Some(Protocol::Ws),
+            Some(Protocol::P2p(_)) | None,
             None,
         ) => AddressOrMultiStreamAddress::Address(Address::WebSocketDns {
             hostname: str::from_utf8(addr.into_bytes()).map_err(Error::NonUtf8DomainName)?,
@@ -100,6 +103,7 @@ pub fn multiaddr_to_address(
             Protocol::Dns(addr) | Protocol::Dns4(addr) | Protocol::Dns6(addr),
             Protocol::Tcp(port),
             Some(Protocol::Wss),
+            Some(Protocol::P2p(_)) | None,
             None,
         )
         | (
@@ -107,6 +111,7 @@ pub fn multiaddr_to_address(
             Protocol::Tcp(port),
             Some(Protocol::Tls),
             Some(Protocol::Ws),
+            Some(Protocol::P2p(_)) | None,
         ) => AddressOrMultiStreamAddress::Address(Address::WebSocketDns {
             hostname: str::from_utf8(addr.into_bytes()).map_err(Error::NonUtf8DomainName)?,
             port,
@@ -118,6 +123,7 @@ pub fn multiaddr_to_address(
             Protocol::Udp(port),
             Some(Protocol::WebRtcDirect),
             Some(Protocol::Certhash(multihash)),
+            Some(Protocol::P2p(_)) | None,
         ) => {
             if multihash.hash_algorithm_code() != 0x12 {
                 return Err(Error::NonSha256Certhash);
@@ -137,6 +143,7 @@ pub fn multiaddr_to_address(
             Protocol::Udp(port),
             Some(Protocol::WebRtcDirect),
             Some(Protocol::Certhash(multihash)),
+            Some(Protocol::P2p(_)) | None,
         ) => {
             if multihash.hash_algorithm_code() != 0x12 {
                 return Err(Error::NonSha256Certhash);
