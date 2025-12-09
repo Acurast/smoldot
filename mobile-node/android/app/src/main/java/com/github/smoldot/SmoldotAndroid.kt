@@ -115,7 +115,7 @@ internal class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
 
         init {
             CoroutineScope(jsonRpcResponsesContext).launch {
-                while (true) {
+                while (isActive) {
                     val response = jniJsonRpcResponsesPeek(id.toUInt().toLong())
 
                     if (response != null) {
