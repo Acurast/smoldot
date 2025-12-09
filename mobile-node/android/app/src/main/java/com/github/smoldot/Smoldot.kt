@@ -1,10 +1,12 @@
 package com.github.smoldot
 
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.io.Closeable
+import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import kotlin.concurrent.atomics.updateAndFetch
 
+@OptIn(ExperimentalAtomicApi::class)
 public interface Smoldot {
     public suspend fun addChain(
         chainSpec: String,
@@ -34,26 +36,19 @@ public interface Smoldot {
     }
 
     public companion object {
-        private val instanceMutex: Mutex = Mutex()
-        private var INSTANCE: Smoldot? = null
-
-        private var factory: (() -> Smoldot)? = null
+        private var INSTANCE: AtomicReference<Smoldot?> = AtomicReference(null)
+        private var factory: AtomicReference<(() -> Smoldot)?> = AtomicReference(null)
 
         internal fun useInstance(factory: () -> Smoldot) {
-            this.factory = factory
+            this.factory.store(factory)
         }
 
-        public suspend fun instance(): Smoldot = instanceMutex.withLock {
-            INSTANCE
-                ?: factory?.invoke()?.also { INSTANCE = it }
+        public fun instance(): Smoldot =
+            INSTANCE.updateAndFetch { it ?: factory.load()?.invoke() }
                 ?: throw IllegalStateException("Smoldot not initialized. Call platform init method first.")
-        }
 
         public suspend fun reset() {
-            instanceMutex.withLock {
-                INSTANCE?.destroy()
-                INSTANCE = null
-            }
+            INSTANCE.exchange(null)?.destroy()
         }
     }
 }

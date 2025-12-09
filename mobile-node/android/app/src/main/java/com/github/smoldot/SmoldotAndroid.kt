@@ -4,13 +4,16 @@ import com.github.smoldot.internal.utils.MutableSharedMapFlow
 import kotlinx.coroutines.CloseableCoroutineDispatcher
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.newSingleThreadContext
 import kotlinx.coroutines.sync.Mutex
@@ -105,8 +108,11 @@ internal class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
         jniDestroy()
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class, DelicateCoroutinesApi::class)
     public inner class Chain(override val id: Int) : Smoldot.Chain {
-        private val jsonRpcResponsesContext: CloseableCoroutineDispatcher = newSingleThreadContext("Chain\$$id-json-rpc-responses")
+        private val jsonRpcResponsesContext: CloseableCoroutineDispatcher = newSingleThreadContext(
+            $$"Chain$$$id-json-rpc-responses"
+        )
         private var jsonRpcResponsesNonEmpty: CompletableDeferred<Unit>? = null
         private val _jsonRpcResponses: MutableSharedFlow<String> = MutableSharedFlow()
 

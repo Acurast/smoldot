@@ -1,6 +1,9 @@
+@file:OptIn(ExperimentalForInheritanceCoroutinesApi::class)
+
 package com.github.smoldot.internal.utils
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -38,19 +41,19 @@ private class MutableSharedMapFlowImpl<K, V> (
         with(subscribedMutex) { subscribed.await(key) }
     }
 
-    context(Mutex)
+    context(mutex: Mutex)
     private suspend fun MutableMap<K, CompletableDeferred<Unit>>.complete(key: K) {
-        withLock { getOrPutNew(key) }.takeIf { !it.isCompleted }?.complete(Unit)
+        mutex.withLock { getOrPutNew(key) }.takeIf { !it.isCompleted }?.complete(Unit)
     }
 
-    context(Mutex)
+    context(mutex: Mutex)
     private suspend fun MutableMap<K, CompletableDeferred<Unit>>.clear(key: K) {
-        withLock { remove(key) }
+        mutex.withLock { remove(key) }
     }
 
-    context(Mutex)
+    context(mutex: Mutex)
     private suspend fun MutableMap<K, CompletableDeferred<Unit>>.await(key: K) {
-        withLock { getOrPutNew(key) }.await()
+        mutex.withLock { getOrPutNew(key) }.await()
     }
 
     private fun MutableMap<K, CompletableDeferred<Unit>>.getOrPutNew(key: K): CompletableDeferred<Unit> =
