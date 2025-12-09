@@ -8,8 +8,8 @@
 #include "data.h"
 #include "utils.h"
 
+#include <memory>
 #include <mutex>
-#include <vector>
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,18 +19,20 @@ namespace Smoldot {
 
     class State {
     private:
-        State() = default;
-        ~State() = default;
-
-        static State* instance_;
+        static std::unique_ptr<State> instance_;
         static std::mutex instance_mutex_;
 
-        mutable std::mutex event_observers_mutex_;
-        Event::Observer* event_observer_;
+        mutable std::mutex event_observer_mutex_;
+        Event::Observer* event_observer_ = nullptr;
 
     public:
-        State(State &other) = delete;
+        State() = default;
+        ~State() noexcept = default;
+
+        State(const State &other) = delete;
+        State(State &&other) = delete;
         void operator=(const State &) = delete;
+        void operator=(State &&) = delete;
 
         static State* Get();
         static void Reset();

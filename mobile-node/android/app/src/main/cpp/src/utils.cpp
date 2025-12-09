@@ -50,3 +50,20 @@ bool GetJniEnv(JavaVM *vm, JNIEnv **env, int32_t version) {
     }
     return did_attach_thread;
 }
+
+void DeleteLocalRefs(JNIEnv *env, std::vector<jobject> refs) {
+    for (jobject ref : refs) {
+        env->DeleteLocalRef(ref);
+    }
+}
+
+bool HandleException(JNIEnv *env) {
+    if (!env->ExceptionCheck()) {
+        return false;
+    }
+
+    env->ExceptionDescribe();
+    env->ExceptionClear();
+
+    return true;
+}

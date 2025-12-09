@@ -18,10 +18,10 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import kotlin.math.log
+import java.util.UUID
 import kotlin.math.min
 
-public class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
+internal class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
     private val coroutineScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val chainResults: MutableSharedMapFlow<Int, Result<Unit>> = MutableSharedMapFlow()
@@ -30,7 +30,9 @@ public class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
     private val chains: MutableMap<Int, Chain> = mutableMapOf()
 
     init {
-        jniInit(logLevel.value.toLong())
+        if (!jniInit(UUID.randomUUID().hashCode(), logLevel.value.toLong())) {
+            throw IllegalStateException("Only one instance of SmoldotAndroid can be active at the time.")
+        }
     }
 
     override suspend fun addChain(
@@ -150,7 +152,7 @@ public class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
 
     }
 
-    private external fun jniInit(logLevel: Long)
+    private external fun jniInit(id: Int, logLevel: Long): Boolean
 
     private external fun jniAddChain(
         chainSpec: ByteArray,

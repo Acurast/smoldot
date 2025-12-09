@@ -5,43 +5,44 @@
 #include "smoldot.h"
 
 namespace Smoldot {
-    State *State::instance_ = nullptr;
+    std::unique_ptr<State> State::instance_;
     std::mutex State::instance_mutex_;
 
     State *State::Get() {
         std::lock_guard<std::mutex> lock(instance_mutex_);
 
-        if (instance_ == nullptr) {
-            instance_ = new State();
+        if (!instance_) {
+            instance_ = std::make_unique<State>();
         }
 
-        return instance_;
+        return instance_.get();
     }
 
     void State::Reset() {
         std::lock_guard<std::mutex> lock(instance_mutex_);
 
-        if (instance_ == nullptr) {
+        if (instance_) {
             instance_->RemoveEventObserver();
         }
 
-        delete instance_;
-        instance_ = nullptr;
+        instance_.reset();
     }
 
     void State::SetEventObserver(Event::Observer *observer) {
-        std::lock_guard<std::mutex> lock(event_observers_mutex_);
+        std::lock_guard<std::mutex> lock(event_observer_mutex_);
 
         event_observer_ = observer;
     }
 
     void State::RemoveEventObserver() {
-        std::lock_guard<std::mutex> lock(event_observers_mutex_);
+        std::lock_guard<std::mutex> lock(event_observer_mutex_);
 
         event_observer_ = nullptr;
     }
 
     void State::OnEvent(Event::Instance *event) {
+        std::lock_guard<std::mutex> lock(event_observer_mutex_);
+
         if (event_observer_ == nullptr) {
             return;
         }

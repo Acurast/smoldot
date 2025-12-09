@@ -13,6 +13,9 @@
 #include <android/log.h>
 #include <jni.h>
 
+#include <mutex>
+#include <vector>
+
 #ifdef __cplusplus
 extern "C" {
 #endif //__cplusplus
@@ -22,9 +25,10 @@ namespace JNI {
     private:
         JavaVM* jvm_;
         int32_t jni_version_;
+        int32_t id_;
 
     public:
-        EventObserver(JavaVM* jvm, int32_t jni_version);
+        EventObserver(JavaVM* jvm, int32_t jni_version, int32_t id);
         void OnEvent(Event::Instance* event) override;
     };
 }

@@ -23,5 +23,7 @@ std::vector<uint8_t> GetUInt8Vector(JNIEnv *env, jbyteArray bytes);
 /******** JVM ********/
 
 bool GetJniEnv(JavaVM *vm, JNIEnv **env, int32_t version);
+void DeleteLocalRefs(JNIEnv *env, std::vector<jobject> refs);
+bool HandleException(JNIEnv *env);
 
 #endif //SMOLDOT_ANDROID_UTILS_H
