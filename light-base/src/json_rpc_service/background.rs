@@ -449,6 +449,11 @@ enum Event<TPlat: PlatformRef> {
         event: transactions_service::TransactionStatus,
         watcher: Pin<Box<transactions_service::TransactionWatcher>>,
     },
+    TransactionProcessed {
+        request_id_json: String,
+        transaction_hash: [u8; 32],
+        status: Option<transactions_service::TransactionStatus>,
+    },
     ChainGetBlockResult {
         request_id_json: String,
         result: Result<codec::BlockData, ()>,
@@ -1077,18 +1082,27 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         hash_context.update(&transaction.0);
                         let mut transaction_hash: [u8; 32] = Default::default();
                         transaction_hash.copy_from_slice(hash_context.finalize().as_bytes());
-                        me.transactions_service
-                            .submit_transaction(transaction.0)
-                            .await;
-                        let _ = me
-                            .responses_tx
-                            .send(
-                                methods::Response::author_submitExtrinsic(methods::HashHexString(
-                                    transaction_hash,
-                                ))
-                                .to_json_response(request_id_json),
-                            )
-                            .await;
+
+                        // Unlike the upstream implementation, which submits the transaction and
+                        // immediately returns its hash, we watch the transaction and only respond
+                        // once it has been validated (or rejected). This lets the JSON-RPC client
+                        // learn synchronously that a clearly-invalid transaction was rejected,
+                        // instead of having it silently get stuck.
+                        let mut transaction_updates = Box::pin(
+                            me.transactions_service
+                                .submit_and_watch_transaction(transaction.0, 16, true)
+                                .await,
+                        );
+
+                        let request_id_json = request_id_json.to_owned();
+                        me.background_tasks.push(Box::pin(async move {
+                            let status = transaction_updates.as_mut().next().await;
+                            Event::TransactionProcessed {
+                                request_id_json,
+                                transaction_hash,
+                                status,
+                            }
+                        }));
                     }
 
                     methods::MethodCall::author_submitAndWatchExtrinsic { transaction } => {
@@ -5770,6 +5784,126 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         watcher,
                     }
                 }));
+            }
+
+            WakeUpReason::Event(Event::TransactionProcessed {
+                request_id_json,
+                transaction_hash,
+                status,
+            }) => {
+                // The transaction submitted through `author_submitExtrinsic` has produced its
+                // first status update (or its watcher ended without one). Respond with the
+                // transaction hash on success, or a JSON-RPC error if it was rejected.
+                let status = match status {
+                    Some(status) => status,
+                    None => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::author_submitExtrinsic(
+                                    methods::HashHexString(transaction_hash),
+                                )
+                                .to_json_response(&request_id_json),
+                            )
+                            .await;
+
+                        return;
+                    }
+                };
+
+                match status {
+                    transactions_service::TransactionStatus::Broadcast(_)
+                    | transactions_service::TransactionStatus::IncludedBlockUpdate { .. }
+                    | transactions_service::TransactionStatus::Validated
+                    | transactions_service::TransactionStatus::Dropped(
+                        transactions_service::DropReason::Finalized { .. },
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::author_submitExtrinsic(
+                                    methods::HashHexString(transaction_hash),
+                                )
+                                .to_json_response(&request_id_json),
+                            )
+                            .await;
+                    }
+                    transactions_service::TransactionStatus::Dropped(
+                        transactions_service::DropReason::GapInChain,
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(parse::build_error_response(
+                                &request_id_json,
+                                parse::ErrorResponse::ApplicationDefined(
+                                    -32900,
+                                    "Rejected due to a gap in the chain of blocks.",
+                                ),
+                                None,
+                            ))
+                            .await;
+                    }
+                    transactions_service::TransactionStatus::Dropped(
+                        transactions_service::DropReason::MaxPendingTransactionsReached,
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(parse::build_error_response(
+                                &request_id_json,
+                                parse::ErrorResponse::ApplicationDefined(
+                                    -32900,
+                                    "Max pending transactions reached.",
+                                ),
+                                None,
+                            ))
+                            .await;
+                    }
+                    transactions_service::TransactionStatus::Dropped(
+                        transactions_service::DropReason::Invalid(error),
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(parse::build_error_response(
+                                &request_id_json,
+                                parse::ErrorResponse::ApplicationDefined(
+                                    -32900,
+                                    &error.to_string(),
+                                ),
+                                None,
+                            ))
+                            .await;
+                    }
+                    transactions_service::TransactionStatus::Dropped(
+                        transactions_service::DropReason::ValidateError(error),
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(parse::build_error_response(
+                                &request_id_json,
+                                parse::ErrorResponse::ApplicationDefined(
+                                    -32900,
+                                    &error.to_string(),
+                                ),
+                                None,
+                            ))
+                            .await;
+                    }
+                    transactions_service::TransactionStatus::Dropped(
+                        transactions_service::DropReason::Crashed,
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(parse::build_error_response(
+                                &request_id_json,
+                                parse::ErrorResponse::ServerError(
+                                    -32000,
+                                    "Transaction service background task crashed.",
+                                ),
+                                None,
+                            ))
+                            .await;
+                    }
+                }
             }
 
             WakeUpReason::Event(Event::ChainGetBlockResult {
