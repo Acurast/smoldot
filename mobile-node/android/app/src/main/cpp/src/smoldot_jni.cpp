@@ -8,7 +8,7 @@ namespace JNI {
     std::mutex mutex;
     int32_t id = 0;
     jobject smoldot = nullptr;
-    std::unique_ptr<EventObserver> eventObserver;
+    std::shared_ptr<EventObserver> eventObserver;
 
     EventObserver::EventObserver(JavaVM *jvm, int32_t jni_version, int32_t id) : Event::Observer() {
         jvm_ = jvm;
@@ -20,6 +20,7 @@ namespace JNI {
         JavaVM *_jvm;
         int32_t _jni_version;
         int32_t _id;
+        int32_t _jni_id;
 
         {
             std::lock_guard<std::mutex> lock(JNI::mutex);
@@ -30,15 +31,19 @@ namespace JNI {
             _jvm = jvm_;
             _jni_version = jni_version_;
             _id = id_;
+            _jni_id = JNI::id;
         }
 
         JNIEnv *env;
 
         auto did_attach_thread = GetJniEnv(_jvm, &env, _jni_version);
+        if (env == nullptr) {
+            return;
+        }
         switch (event->GetType()) {
             case Event::Type::kLog: {
                 auto log_event = dynamic_cast<Event::Log*>(event);
-                if (log_event == nullptr || id != _id) {
+                if (log_event == nullptr || _jni_id != _id) {
                     break;
                 }
 
@@ -72,7 +77,7 @@ namespace JNI {
             }
             case Event::Type::kPanic: {
                 auto panic_event = dynamic_cast<Event::Panic*>(event);
-                if (panic_event == nullptr || id != _id) {
+                if (panic_event == nullptr || _jni_id != _id) {
                     break;
                 }
 
@@ -106,8 +111,9 @@ namespace JNI {
                     local_refs.push_back(clazz);
 
                     jmethodID on_chain_initialized = env->GetMethodID(clazz, "onChainInitialized","(JLjava/lang/String;)V");
-                    if (HandleException(env)) {
-                        error_str = env->NewStringUTF("Unknown error");
+                    if (HandleException(env) || on_chain_initialized == nullptr) {
+                        DeleteLocalRefs(env, local_refs);
+                        break;
                     }
 
                     env->CallVoidMethod(smoldot, on_chain_initialized, static_cast<jlong>(chain_id), error_str);
@@ -179,10 +185,10 @@ Java_com_github_smoldot_SmoldotAndroid_jniInit(JNIEnv *env, jobject thiz, jint i
 
         JNI::id = static_cast<int32_t>(id);
         JNI::smoldot = env->NewGlobalRef(thiz);
-        JNI::eventObserver = std::make_unique<JNI::EventObserver>(jvm, jni_version, JNI::id);
+        JNI::eventObserver = std::make_shared<JNI::EventObserver>(jvm, jni_version, JNI::id);
     }
 
-    Smoldot::State::Get()->SetEventObserver(JNI::eventObserver.get());
+    Smoldot::State::Get()->SetEventObserver(JNI::eventObserver);
 
     auto max_log_level = Log::GetLevel(static_cast<uint32_t>(log_level));
     init(max_log_level);

@@ -22,6 +22,7 @@ import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 
 internal class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
@@ -114,13 +115,18 @@ internal class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
             $$"Chain$$$id-json-rpc-responses"
         )
         private var jsonRpcResponsesNonEmpty: CompletableDeferred<Unit>? = null
-        private val _jsonRpcResponses: MutableSharedFlow<String> = MutableSharedFlow()
+        private val _jsonRpcResponses: MutableSharedFlow<String> =
+            MutableSharedFlow(extraBufferCapacity = JSON_RPC_RESPONSES_BUFFER_CAPACITY)
 
         override val jsonRpcResponses: Flow<String>
             get() = _jsonRpcResponses.asSharedFlow()
 
+        private val closed: AtomicBoolean = AtomicBoolean(false)
+
+        private val jsonRpcResponsesScope: CoroutineScope = CoroutineScope(jsonRpcResponsesContext)
+
         init {
-            CoroutineScope(jsonRpcResponsesContext).launch {
+            jsonRpcResponsesScope.launch {
                 while (isActive) {
                     val response = jniJsonRpcResponsesPeek(id.toUInt().toLong())
 
@@ -146,14 +152,22 @@ internal class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
         }
 
         internal fun onNonEmptyJsonRpcResponses() {
-            CoroutineScope(jsonRpcResponsesContext).launch {
+            jsonRpcResponsesScope.launch {
                 jsonRpcResponsesNonEmpty?.complete(Unit)
             }
         }
 
-        override fun close() {
+        override suspend fun close() {
+            if (!closed.compareAndSet(false, true)) return
+
+            jsonRpcResponsesScope.cancel()
+            // Remove the chain on the single-threaded dispatcher so it can never run concurrently
+            // with an in-flight jniJsonRpcResponsesPeek, whose returned pointer would otherwise be
+            // invalidated mid-read.
+            withContext(jsonRpcResponsesContext) {
+                jniRemoveChain(id.toUInt().toLong())
+            }
             jsonRpcResponsesContext.close()
-            jniRemoveChain(id.toUInt().toLong())
         }
 
     }
@@ -172,6 +186,10 @@ internal class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
     private external fun jniSendJsonRpc(request: ByteArray, chainId: Long): Long
     private external fun jniJsonRpcResponsesPeek(chainId: Long): ByteArray?
     private external fun jniDestroy()
+
+    private companion object {
+        private const val JSON_RPC_RESPONSES_BUFFER_CAPACITY: Int = 64
+    }
 }
 
 public fun Smoldot.Companion.initAndroid(logLevel: Smoldot.LogLevel = Smoldot.LogLevel.Info) {

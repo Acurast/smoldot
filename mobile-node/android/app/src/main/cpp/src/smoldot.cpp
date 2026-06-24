@@ -28,10 +28,10 @@ namespace Smoldot {
         instance_.reset();
     }
 
-    void State::SetEventObserver(Event::Observer *observer) {
+    void State::SetEventObserver(std::shared_ptr<Event::Observer> observer) {
         std::lock_guard<std::mutex> lock(event_observer_mutex_);
 
-        event_observer_ = observer;
+        event_observer_ = std::move(observer);
     }
 
     void State::RemoveEventObserver() {
@@ -41,13 +41,21 @@ namespace Smoldot {
     }
 
     void State::OnEvent(Event::Instance *event) {
-        std::lock_guard<std::mutex> lock(event_observer_mutex_);
+        // Take a strong reference to the observer under the lock, then release the lock before
+        // dispatching. This keeps the observer alive for the duration of the (potentially
+        // re-entrant) JNI up-call without holding `event_observer_mutex_` across it.
+        std::shared_ptr<Event::Observer> observer;
+        {
+            std::lock_guard<std::mutex> lock(event_observer_mutex_);
+            observer = event_observer_;
+        }
 
-        if (event_observer_ == nullptr) {
+        if (observer == nullptr) {
+            delete event;
             return;
         }
 
-        event_observer_->OnEvent(event);
+        observer->OnEvent(event);
         delete event;
     }
 }

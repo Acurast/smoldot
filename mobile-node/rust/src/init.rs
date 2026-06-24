@@ -17,6 +17,7 @@
 
 use alloc::{boxed::Box, format, string::String};
 use core::iter;
+use core::sync::atomic::{AtomicBool, Ordering};
 use std::panic;
 
 use futures_util::stream;
@@ -54,13 +55,18 @@ pub(crate) enum Chain {
 }
 
 pub(crate) fn init(max_log_level: u32) {
-    // Set panic hook
-    panic::set_hook(Box::new(platform::panic_handler));
-
-    // Initialize the maximum log level.
+    // The maximum log level can be updated on every call (e.g. after a destroy/re-init).
     platform::LOGGER.set_max_level(max_log_level);
 
-    // Try to initialize the logging.
+    // The panic hook and logger are process-global and survive a destroy/re-init, so they must
+    // only be installed once. Re-installing the panic hook would clobber any hook set elsewhere
+    // in the host process.
+    static INITIALIZED: AtomicBool = AtomicBool::new(false);
+    if INITIALIZED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    panic::set_hook(Box::new(platform::panic_handler));
     let _ = log::set_logger(&platform::LOGGER);
 
     // Print the version in order to make it easier to debug issues by reading logs provided by

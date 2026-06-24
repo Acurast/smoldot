@@ -1,7 +1,6 @@
 package com.github.smoldot
 
 import kotlinx.coroutines.flow.Flow
-import java.io.Closeable
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.concurrent.atomics.updateAndFetch
@@ -20,11 +19,12 @@ public interface Smoldot {
 
     public suspend fun destroy()
 
-    public interface Chain : Closeable {
+    public interface Chain {
         public val id: Int
         public val jsonRpcResponses: Flow<String>
 
         public suspend fun sendJsonRpc(request: String)
+        public suspend fun close()
     }
 
     public enum class LogLevel(internal val value: UInt) {

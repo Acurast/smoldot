@@ -23,7 +23,7 @@ namespace Smoldot {
         static std::mutex instance_mutex_;
 
         mutable std::mutex event_observer_mutex_;
-        Event::Observer* event_observer_ = nullptr;
+        std::shared_ptr<Event::Observer> event_observer_ = nullptr;
 
     public:
         State() = default;
@@ -37,7 +37,7 @@ namespace Smoldot {
         static State* Get();
         static void Reset();
 
-        void SetEventObserver(Event::Observer* observer);
+        void SetEventObserver(std::shared_ptr<Event::Observer> observer);
         void RemoveEventObserver();
         void OnEvent(Event::Instance* type);
     };
