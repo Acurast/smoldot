@@ -18,4 +18,4 @@ futures-lite = { version = "2.3.0" }
 futures-util = { version = "0.3.27" }
 log = { version = "0.4.21", default-features = false }
 slab = { version = "0.4.8" }
-smoldot-light = { version = "0.17.0", path = "../../light-base", default-features = false, features = ["std"] }
+smoldot-light = { version = "1.2.0", path = "../../light-base", default-features = false, features = ["std"] }
