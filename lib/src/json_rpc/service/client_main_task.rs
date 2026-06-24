@@ -394,6 +394,7 @@ impl ClientMainTask {
                 | methods::MethodCall::author_rotateKeys { .. }
                 | methods::MethodCall::author_submitExtrinsic { .. }
                 | methods::MethodCall::babe_epochAuthorship { .. }
+                | methods::MethodCall::bitswap_unstable_get { .. }
                 | methods::MethodCall::chain_getBlock { .. }
                 | methods::MethodCall::chain_getBlockHash { .. }
                 | methods::MethodCall::chain_getFinalizedHead { .. }
@@ -433,6 +434,7 @@ impl ClientMainTask {
                 | methods::MethodCall::system_properties { .. }
                 | methods::MethodCall::system_removeReservedPeer { .. }
                 | methods::MethodCall::system_version { .. }
+                | methods::MethodCall::statement_submit { .. }
                 | methods::MethodCall::chainSpec_v1_chainName { .. }
                 | methods::MethodCall::chainSpec_v1_genesisHash { .. }
                 | methods::MethodCall::chainSpec_v1_properties { .. }
@@ -467,9 +469,11 @@ impl ClientMainTask {
                 | methods::MethodCall::chain_subscribeNewHeads { .. }
                 | methods::MethodCall::state_subscribeRuntimeVersion { .. }
                 | methods::MethodCall::state_subscribeStorage { .. }
+                | methods::MethodCall::statement_subscribeStatement { .. }
                 | methods::MethodCall::transaction_v1_broadcast { .. }
                 | methods::MethodCall::transactionWatch_v1_submitAndWatch { .. }
                 | methods::MethodCall::sudo_network_unstable_watch { .. }
+                | methods::MethodCall::bitswap_unstable_stream { .. }
                 | methods::MethodCall::chainHead_v1_follow { .. } => {
                     // Subscription starting requests.
 
@@ -545,6 +549,7 @@ impl ClientMainTask {
                 }
                 | methods::MethodCall::transactionWatch_v1_unwatch { subscription, .. }
                 | methods::MethodCall::sudo_network_unstable_unwatch { subscription, .. }
+                | methods::MethodCall::bitswap_unstable_unstream { subscription, .. }
                 | methods::MethodCall::chainHead_v1_unfollow {
                     follow_subscription: subscription,
                     ..
@@ -575,6 +580,9 @@ impl ClientMainTask {
                                     methods::MethodCall::sudo_network_unstable_unwatch {
                                         ..
                                     } => methods::Response::sudo_network_unstable_unwatch(()),
+                                    methods::MethodCall::bitswap_unstable_unstream { .. } => {
+                                        methods::Response::bitswap_unstable_unstream(())
+                                    }
                                     methods::MethodCall::chainHead_v1_unfollow { .. } => {
                                         methods::Response::chainHead_v1_unfollow(())
                                     }
@@ -600,9 +608,14 @@ impl ClientMainTask {
                                     methods::Response::state_unsubscribeStorage(false)
                                         .to_json_response(request_id)
                                 }
+                                methods::MethodCall::bitswap_unstable_unstream { .. } => {
+                                    // Per spec: no error if subscription is unknown or already-completed.
+                                    methods::Response::bitswap_unstable_unstream(())
+                                        .to_json_response(request_id)
+                                }
                                 _ => parse::build_error_response(
                                     request_id,
-                                    ErrorResponse::InvalidParams,
+                                    ErrorResponse::InvalidParams(None),
                                     None,
                                 ),
                             };
@@ -624,7 +637,8 @@ impl ClientMainTask {
                 }
                 methods::MethodCall::chain_unsubscribeAllHeads { subscription, .. }
                 | methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription, .. }
-                | methods::MethodCall::chain_unsubscribeNewHeads { subscription, .. } => {
+                | methods::MethodCall::chain_unsubscribeNewHeads { subscription, .. }
+                | methods::MethodCall::statement_unsubscribeStatement { subscription, .. } => {
                     // TODO: DRY with above
                     // TODO: must check whether type of subscription matches
                     match self.inner.active_subscriptions.get_mut(&**subscription) {
@@ -645,6 +659,10 @@ impl ClientMainTask {
                                     methods::Response::chain_unsubscribeNewHeads(true)
                                         .to_json_response(request_id)
                                 }
+                                methods::MethodCall::statement_unsubscribeStatement { .. } => {
+                                    methods::Response::statement_unsubscribeStatement(true)
+                                        .to_json_response(request_id)
+                                }
                                 _ => unreachable!(),
                             });
 
@@ -663,6 +681,10 @@ impl ClientMainTask {
                                 }
                                 methods::MethodCall::chain_unsubscribeNewHeads { .. } => {
                                     methods::Response::chain_unsubscribeNewHeads(false)
+                                        .to_json_response(request_id)
+                                }
+                                methods::MethodCall::statement_unsubscribeStatement { .. } => {
+                                    methods::Response::statement_unsubscribeStatement(false)
                                         .to_json_response(request_id)
                                 }
                                 _ => unreachable!(),
@@ -1163,6 +1185,11 @@ impl SubscriptionStartProcess {
             }
             methods::MethodCall::state_subscribeStorage { .. } => {
                 methods::Response::state_subscribeStorage(Cow::Borrowed(&self.subscription_id))
+            }
+            methods::MethodCall::statement_subscribeStatement { .. } => {
+                methods::Response::statement_subscribeStatement(Cow::Borrowed(
+                    &self.subscription_id,
+                ))
             }
             methods::MethodCall::transactionWatch_v1_submitAndWatch { .. } => {
                 methods::Response::transactionWatch_v1_submitAndWatch(Cow::Borrowed(

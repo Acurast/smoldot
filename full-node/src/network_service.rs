@@ -408,6 +408,7 @@ impl NetworkService {
                         max_in_peers: chain.max_in_peers,
                         max_slots: chain.max_slots,
                     },
+                    enable_statement_protocol: false,
                 })
                 .unwrap(); // TODO: don't unwrap?
 
@@ -1072,14 +1073,23 @@ async fn background_task(mut inner: Inner) {
                         PeerId::from_public_key(&peer_id::PublicKey::Ed25519(rand::random()));
 
                     // TODO: select target closest to the random peer instead
+                    // Prefer peers known to speak Kad via Identify; fall back to gossip-open
+                    // peers (we know they share this chain even if we haven't seen Identify yet).
                     let target = inner
                         .network
-                        .gossip_connected_peers(
-                            chain_id,
-                            service::GossipKind::ConsensusTransactions,
-                        )
+                        .kademlia_capable_peers(chain_id)
                         .next()
-                        .cloned();
+                        .cloned()
+                        .or_else(|| {
+                            inner
+                                .network
+                                .gossip_connected_peers(
+                                    chain_id,
+                                    service::GossipKind::ConsensusTransactions,
+                                )
+                                .next()
+                                .cloned()
+                        });
 
                     if let Some(target) = target {
                         match inner.network.start_kademlia_find_node_request(
@@ -2257,6 +2267,45 @@ async fn background_task(mut inner: Inner) {
                     ),
                 );
             }
+
+            WakeUpReason::NetworkEvent(service::Event::StatementsNotification {
+                peer_id,
+                chain_id,
+                ..
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "statement-notification; peer_id={}; chain={}",
+                        peer_id, inner.network[chain_id].log_name
+                    ),
+                );
+            }
+
+            WakeUpReason::NetworkEvent(service::Event::StatementProtocolConnected {
+                peer_id,
+                chain_id,
+                version,
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "statement-protocol-connected; peer_id={}; chain={}; version={:?}",
+                        peer_id, inner.network[chain_id].log_name, version
+                    ),
+                );
+            }
+
+            // TODO: we don't filter outbound statements yet
+            WakeUpReason::NetworkEvent(service::Event::StatementTopicAffinityReceived {
+                ..
+            }) => {}
+
+            // Bitswap events are not handled by the full node.
+            WakeUpReason::NetworkEvent(service::Event::BitswapConnected { .. })
+            | WakeUpReason::NetworkEvent(service::Event::BitswapOpenFailed { .. })
+            | WakeUpReason::NetworkEvent(service::Event::BitswapMessage { .. })
+            | WakeUpReason::NetworkEvent(service::Event::BitswapDisconnected { .. }) => {}
         }
     }
 }

@@ -509,6 +509,33 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 jsonRpcMaxSubscriptions = 0xffffffff
             }
 
+            // Sanitize `statementStore`.
+            let statementStoreMaxSeenStatements = 0;
+            let statementStoreFalsePositiveRate = 0.0;
+            let statementStoreAffinityUpdateIntervalMs = 0;
+            if (options.statementStore !== undefined) {
+                statementStoreMaxSeenStatements = options.statementStore.maxSeenStatements === undefined ? 65536 : options.statementStore.maxSeenStatements;
+                statementStoreMaxSeenStatements = Math.floor(statementStoreMaxSeenStatements);
+                if (statementStoreMaxSeenStatements <= 0 || isNaN(statementStoreMaxSeenStatements)) {
+                    throw new AddChainError("Invalid value for `statementStore.maxSeenStatements`");
+                }
+                if (statementStoreMaxSeenStatements > 0xffffffff) {
+                    statementStoreMaxSeenStatements = 0xffffffff;
+                }
+                statementStoreFalsePositiveRate = options.statementStore.falsePositiveRate === undefined ? 0.01 : options.statementStore.falsePositiveRate;
+                if (statementStoreFalsePositiveRate <= 0.0 || statementStoreFalsePositiveRate >= 1.0 || isNaN(statementStoreFalsePositiveRate)) {
+                    throw new AddChainError("Invalid value for `statementStore.falsePositiveRate`");
+                }
+                statementStoreAffinityUpdateIntervalMs = options.statementStore.affinityUpdateIntervalMs === undefined ? 1000 : options.statementStore.affinityUpdateIntervalMs;
+                statementStoreAffinityUpdateIntervalMs = Math.floor(statementStoreAffinityUpdateIntervalMs);
+                if (statementStoreAffinityUpdateIntervalMs <= 0 || isNaN(statementStoreAffinityUpdateIntervalMs)) {
+                    throw new AddChainError("Invalid value for `statementStore.affinityUpdateIntervalMs`");
+                }
+                if (statementStoreAffinityUpdateIntervalMs > 0xffffffff) {
+                    statementStoreAffinityUpdateIntervalMs = 0xffffffff;
+                }
+            }
+
             // Sanitize `databaseContent`.
             if (options.databaseContent !== undefined && typeof options.databaseContent !== 'string')
                 throw new AddChainError("`databaseContent` is not a string");
@@ -521,7 +548,10 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 potentialRelayChainsIds,
                 !!options.disableJsonRpc,
                 jsonRpcMaxPendingRequests,
-                jsonRpcMaxSubscriptions
+                jsonRpcMaxSubscriptions,
+                statementStoreMaxSeenStatements,
+                statementStoreFalsePositiveRate,
+                statementStoreAffinityUpdateIntervalMs
             );
 
             const outcome = await promise;

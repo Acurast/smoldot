@@ -2,6 +2,99 @@
 
 ## Unreleased
 
+## 3.2.0 - 2026-06-02
+
+### Added
+
+- `chainHead_v1_storage` can now read child-trie storage (the default child trie), letting callers read e.g. contract storage directly without going through a runtime call. ([#3278](https://github.com/paritytech/smoldot/pull/3278))
+- Implement the `ext_trie_blake2_256_verify_proof_version_1` and `ext_trie_blake2_256_verify_proof_version_2` host functions. The verifier handles Substrate's compact proof format (as produced by `sp_trie::generate_trie_proof`): path children are replaced by an empty inline placeholder and the target leaf's value is reconstructed from the caller-supplied expected value (hashed for state version V1 values of 33 bytes or more, matching `sp_trie`'s threshold). ([#3263](https://github.com/paritytech/smoldot/pull/3263))
+
+### Fixed
+
+- `ext_transaction_index_index_version_1` and `ext_transaction_index_renew_version_1` now consume their parameters with the correct wasm value types (3xI32 and 2xI32 respectively). The previous code read the first parameter as a packed pointer-size (I64), which crashed the wasm executor as soon as a substrate runtime actually called either function (e.g. `pallet-transaction-storage::store` / `renew`). Behavior remains a no-op since smoldot is a light client and has no offchain transaction index to update. ([#3263](https://github.com/paritytech/smoldot/pull/3263))
+
+## 3.1.4 - 2026-05-29
+
+### Changed
+
+- Revert the immediate parachain block delivery introduced in 3.1.3. ([#3267](https://github.com/paritytech/smoldot/pull/3267))
+- Decide the parachain bootstrap mode up front so `chainHead_v1_follow` subscribers receive an authoritative finalized block instead of a stale chain-spec checkpoint. ([#3268](https://github.com/paritytech/smoldot/pull/3268))
+- Prefer chain-spec bootnodes for relay-chain gossip slots until a chain has an open gossip link, speeding up the first relay-chain gossip after a warm restart. ([#3273](https://github.com/paritytech/smoldot/pull/3273))
+- Shorten handshake and peer-ban timeouts to speed up peer discovery after a restart. ([#3269](https://github.com/paritytech/smoldot/pull/3269))
+
+### Fixed
+
+- Fix `forbidNonLocalWs` auto-detection in browsers, which previously never forbade non-local WebSocket connections on secure origins. ([#3262](https://github.com/paritytech/smoldot/pull/3262))
+- Avoid banning peers that send justifications targeting not-yet-downloaded blocks during post-warp-sync catch-up, removing sync delays. ([#3257](https://github.com/paritytech/smoldot/pull/3257))
+- Floor the statement-distribution affinity bloom filter size so sparse topic subscriptions still produce a realistically-sized filter. ([#3265](https://github.com/paritytech/smoldot/pull/3265))
+
+## 3.1.3 - 2026-05-13
+
+### Changed
+
+- Prefer the `wasm32v1-none` Rust target when building the embedded Wasm if it is installed, falling back to `wasm32-unknown-unknown`. ([#3250](https://github.com/paritytech/smoldot/pull/3250))
+
+### Fixed
+
+- Deliver the warp-synced parachain block to `chainHead_v1_follow` subscribers immediately after relay-chain warp sync, removing the ~6–12s wait for the next relay-chain finalization. ([#3246](https://github.com/paritytech/smoldot/pull/3246))
+
+## 3.1.2 - 2026-05-07
+
+### Added
+
+- Log when the statement protocol substream opens, to make peer connectivity easier to diagnose. ([#3154](https://github.com/paritytech/smoldot/pull/3154))
+
+### Fixed
+
+- Strip the trailing `/p2p/<peer_id>` from discovered addresses so peers advertised in this form are no longer rejected as unsupported, restoring peer discovery beyond the configured bootnodes. ([#3245](https://github.com/paritytech/smoldot/pull/3245))
+- Stop continuously re-trying statement-store submissions after a peer rejects them. ([#3230](https://github.com/paritytech/smoldot/pull/3230))
+- Avoid panicking on shutdown when background tasks observe the client being torn down. ([#3243](https://github.com/paritytech/smoldot/pull/3243))
+
+## 3.1.1 - 2026-04-22
+
+### Fixed
+
+- Fix parachain cold-start where `chainHead_v1_follow` never emitted `initialized` because the bootstrapped runtime was discarded before being passed to the parachain runtime service. ([#3203](https://github.com/paritytech/smoldot/pull/3203))
+- Tolerate races between `chainHead_v1_follow` background events and client-initiated `unfollow` / `stopOperation`, which could previously panic the JSON-RPC background task. ([#3194](https://github.com/paritytech/smoldot/pull/3194))
+
+## 3.1.0 - 2026-04-17
+
+### Added
+
+- Implement Bitswap protocol and `bitswap_v1_get` JSON-RPC method. ([#3148](https://github.com/paritytech/smoldot/pull/3148))
+- Implement explicit topic affinity for the statement distribution protocol V2 using bloom filters. The `falsePositiveRate` and `bloomSeed` options are now configurable per chain. ([#3151](https://github.com/paritytech/smoldot/pull/3151))
+
+### Changed
+
+- Statement deduplication has been moved from the network layer to per-subscription LRU caches in the JSON-RPC layer, so new subscriptions now receive statements already delivered to previous subscriptions. ([#3163](https://github.com/paritytech/smoldot/pull/3163))
+- Reduce the runtime download retry delay from 10s to 4s. ([#3207](https://github.com/paritytech/smoldot/pull/3207))
+- Revert the database loading speed-up from 3.0.0 ([#3155](https://github.com/paritytech/smoldot/pull/3155)) due to regressions. ([#3205](https://github.com/paritytech/smoldot/pull/3205))
+
+## 3.0.0 - 2026-04-10
+
+### Added
+
+- Implement basic statement-store support: statement distribution protocol, topic-based filtering, and JSON-RPC methods for submitting and subscribing to statements. ([#3127](https://github.com/paritytech/smoldot/pull/3127))
+
+### Changed
+
+- The repository has been migrated from `smol-dot/smoldot` to `paritytech/smoldot`.
+- Update some chain specifications to include genesis data. ([#2202](https://github.com/smol-dot/smoldot/pull/2202))
+
+### Fixed
+
+- Fix elastic scaling support. ([#3141](https://github.com/paritytech/smoldot/pull/3141))
+- Fix a panic when importing stale block notifications after finalized blocks have been pruned. ([#3152](https://github.com/paritytech/smoldot/pull/3152))
+- Speed up loading from the database by fixing a 10s cooldown on runtime download that incorrectly triggered at startup. ([#3155](https://github.com/paritytech/smoldot/pull/3155))
+- Fix notifications substream close handling timeout. ([#2214](https://github.com/smol-dot/smoldot/pull/2214))
+- Fix execution proofs with inputs bigger than 1MiB failing due to protocol limits. Smoldot now uses storage-on-demand for large inputs. ([#2196](https://github.com/smol-dot/smoldot/pull/2196))
+
+## 2.0.40 - 2025-12-02
+
+### Added
+
+- Add support for the `ext_transaction_index_index_version_1` and `ext_transaction_index_renew_version_1` host functions as no-op. ([#2189](https://github.com/smol-dot/smoldot/pull/2189))
+
 ## 2.0.39 - 2025-09-15
 
 ### Fixed

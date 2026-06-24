@@ -174,7 +174,9 @@ impl<'a> MethodError<'a> {
                 MethodError::InvalidParametersFormat { .. }
                 | MethodError::TooManyParameters { .. }
                 | MethodError::InvalidParameter { .. }
-                | MethodError::MissingParameters { .. } => parse::ErrorResponse::InvalidParams,
+                | MethodError::MissingParameters { .. } => {
+                    parse::ErrorResponse::InvalidParams(None)
+                }
             },
             None,
         )
@@ -462,6 +464,13 @@ define_methods! {
     /// Returns, as an opaque string, the version of the client serving these JSON-RPC requests.
     system_version() -> Cow<'a, str>,
 
+    /// Broadcast a new statement to peers (light node has no local statement-store).
+    statement_submit(encoded: HexString) -> StatementSubmitResult,
+    /// Subscribe to statements matching the given filter. Returns subscription ID.
+    statement_subscribeStatement(filter: TopicFilter) -> Cow<'a, str>,
+    /// Unsubscribe from statement notifications.
+    statement_unsubscribeStatement(subscription: String) -> bool,
+
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_v1_body(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
@@ -515,12 +524,25 @@ define_methods! {
     transactionWatch_v1_submitAndWatch(transaction: HexString) -> Cow<'a, str>,
     transactionWatch_v1_unwatch(subscription: Cow<'a, str>) -> (),
 
+    /// Request a data chunk by its CID from one of the connected peers that have it.
+    /// `bitswap_v1_get` is accepted as a legacy alias.
+    bitswap_unstable_get(cid: String) -> HexString [bitswap_v1_get],
+    /// Subscribe to a stream of data chunks. Each input CID produces exactly one
+    /// `bitswap_unstable_streamEvent` notification, emitted as soon as that CID
+    /// resolves (in arrival order, not input order). After all per-CID events
+    /// have been emitted, a single `streamDone` event marks end-of-stream.
+    bitswap_unstable_stream(cids: Vec<String>) -> Cow<'a, str>,
+    /// Cancel a `bitswap_unstable_stream` subscription. No-op if the subscription
+    /// does not exist or has already completed.
+    bitswap_unstable_unstream(subscription: Cow<'a, str>) -> (),
+
     // These functions are a custom addition in smoldot. As of the writing of this comment, there
     // is no plan to standardize them. See <https://github.com/paritytech/smoldot/issues/2245> and
     // <https://github.com/paritytech/smoldot/issues/2456>.
     sudo_network_unstable_watch() -> Cow<'a, str>,
     sudo_network_unstable_unwatch(subscription: Cow<'a, str>) -> (),
     chainHead_unstable_finalizedDatabase(#[rename = "maxSizeBytes"] max_size_bytes: Option<u64>) -> Cow<'a, str>,
+
 }
 
 define_methods! {
@@ -536,10 +558,14 @@ define_methods! {
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_v1_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
     transactionWatch_v1_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
+    bitswap_unstable_streamEvent(subscription: Cow<'a, str>, result: BitswapStreamEvent<'a>) -> (),
 
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
     // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
     sudo_networkState_event(subscription: Cow<'a, str>, result: NetworkEvent) -> (),
+
+    // Statement notification sent when statements matching subscribed topics are received.
+    statement_statement(subscription: Cow<'a, str>, result: StatementEvent) -> (),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1076,6 +1102,188 @@ pub enum SystemPeerRole {
     Light,
 }
 
+/// Result of submitting a statement.
+///
+/// JSON format is compatible with polkadot-sdk's `SubmitResult`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum StatementSubmitResult {
+    New,
+    Invalid { reason: InvalidReason },
+    InternalError { error: InternalError },
+}
+
+/// Reason why a submitted statement was rejected as invalid.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum InvalidReason {
+    /// The SCALE-encoded statement failed to decode.
+    #[serde(rename = "Invalid statement encoding")]
+    Encoding,
+}
+
+/// Reason why a submitted statement could not be processed internally.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum InternalError {
+    /// The statement is valid but there were no connected peers to broadcast it to.
+    #[serde(rename = "No connected peers")]
+    NoConnectedPeers,
+}
+
+/// Notification event for statement subscriptions.
+///
+/// JSON format is compatible with polkadot-sdk's `StatementEvent`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event", content = "data", rename_all = "camelCase")]
+pub enum StatementEvent {
+    NewStatements {
+        statements: Vec<HexString>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remaining: Option<u32>,
+    },
+}
+
+/// Filter for subscribing to statements based on topics.
+///
+/// JSON format is compatible with polkadot-sdk's `TopicFilter`:
+/// ```json
+/// "any"
+/// {"matchAll": ["0x0123...abcd", "0x5678...efgh"]}
+/// {"matchAny": ["0x0123...abcd"]}
+/// ```
+#[derive(Debug, Clone)]
+pub enum TopicFilter {
+    Any,
+    MatchAll(Vec<crate::network::codec::Topic>),
+    MatchAny(Vec<crate::network::codec::Topic>),
+}
+
+impl serde::Serialize for TopicFilter {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        fn topics_to_hex(topics: &[crate::network::codec::Topic]) -> Vec<alloc::string::String> {
+            topics
+                .iter()
+                .map(|t| alloc::format!("0x{}", hex::encode(t)))
+                .collect()
+        }
+
+        use serde::ser::SerializeMap;
+
+        let (key, topics) = match self {
+            TopicFilter::Any => return serializer.serialize_str("any"),
+            TopicFilter::MatchAll(topics) => ("matchAll", topics),
+            TopicFilter::MatchAny(topics) => ("matchAny", topics),
+        };
+
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry(key, &topics_to_hex(topics))?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TopicFilter {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        struct TopicFilterVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TopicFilterVisitor {
+            type Value = TopicFilter;
+
+            fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                formatter.write_str(r#""any" or {"matchAll": [...]} or {"matchAny": [...]}"#)
+            }
+
+            fn visit_str<E: Error>(self, value: &str) -> Result<TopicFilter, E> {
+                match value {
+                    "any" => Ok(TopicFilter::Any),
+                    other => Err(E::custom(alloc::format!(
+                        "unknown filter type: {other}, expected \"any\""
+                    ))),
+                }
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<TopicFilter, A::Error> {
+                let key: alloc::string::String = map
+                    .next_key()?
+                    .ok_or_else(|| A::Error::custom("empty object"))?;
+                let hex_topics: alloc::vec::Vec<alloc::string::String> = map.next_value()?;
+                let topics: Vec<crate::network::codec::Topic> = hex_topics
+                    .iter()
+                    .map(|s| {
+                        let s = s.strip_prefix("0x").unwrap_or(s);
+                        let bytes =
+                            hex::decode(s).map_err(|e| A::Error::custom(alloc::format!("{e}")))?;
+                        <[u8; 32]>::try_from(bytes.as_slice())
+                            .map_err(|_| A::Error::custom("topic must be exactly 32 bytes"))
+                    })
+                    .collect::<Result<_, _>>()?;
+
+                match key.as_str() {
+                    "matchAll" => TopicFilter::match_all(topics).map_err(A::Error::custom),
+                    "matchAny" => TopicFilter::match_any(topics).map_err(A::Error::custom),
+                    other => Err(A::Error::custom(alloc::format!(
+                        "unknown filter key: {other}, expected \"matchAll\" or \"matchAny\""
+                    ))),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(TopicFilterVisitor)
+    }
+}
+
+impl TopicFilter {
+    pub fn match_all(
+        topics: Vec<crate::network::codec::Topic>,
+    ) -> Result<Self, alloc::string::String> {
+        if topics.len() > crate::network::codec::MAX_TOPICS {
+            return Err(alloc::format!(
+                "Too many topics for MatchAll: got {}, max {}",
+                topics.len(),
+                crate::network::codec::MAX_TOPICS
+            ));
+        }
+        Ok(TopicFilter::MatchAll(topics))
+    }
+
+    pub fn match_any(
+        topics: Vec<crate::network::codec::Topic>,
+    ) -> Result<Self, alloc::string::String> {
+        if topics.len() > crate::network::codec::MAX_ANY_TOPICS {
+            return Err(alloc::format!(
+                "Too many topics for MatchAny: got {}, max {}",
+                topics.len(),
+                crate::network::codec::MAX_ANY_TOPICS
+            ));
+        }
+        Ok(TopicFilter::MatchAny(topics))
+    }
+
+    pub fn matches(&self, statement_topics: &[crate::network::codec::Topic]) -> bool {
+        match self {
+            TopicFilter::Any => true,
+            TopicFilter::MatchAny(filter_topics) => {
+                if filter_topics.is_empty() {
+                    return false;
+                }
+                statement_topics.iter().any(|t| filter_topics.contains(t))
+            }
+            TopicFilter::MatchAll(filter_topics) => {
+                filter_topics.iter().all(|t| statement_topics.contains(t))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TransactionStatus {
     #[serde(rename = "future")]
@@ -1122,6 +1330,38 @@ impl serde::Serialize for HexString {
     {
         self.to_string().serialize(serializer)
     }
+}
+
+/// Event payload of a `bitswap_unstable_streamEvent` notification.
+///
+/// Serializes as a flat tagged object: every variant carries a top-level
+/// `"event"` discriminator string and its fields appear next to it at the same
+/// level (e.g. `{"event":"streamItem","cid":"...","value":"0x..."}`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event", rename_all = "camelCase")]
+pub enum BitswapStreamEvent<'a> {
+    /// A chunk for one of the input CIDs has been received successfully.
+    StreamItem {
+        /// The CID, echoed verbatim from the input.
+        cid: Cow<'a, str>,
+        /// The chunk data, hex-encoded with a `0x` prefix.
+        value: HexString,
+    },
+    /// One of the input CIDs could not be resolved. The stream continues for
+    /// the remaining CIDs.
+    StreamItemError {
+        /// The CID, echoed verbatim from the input.
+        cid: Cow<'a, str>,
+        /// JSON-RPC error code identifying the retry category. See
+        /// `bitswap_unstable_get` error categories.
+        code: i32,
+        /// Human-readable diagnostic message. Not stable for programmatic dispatch.
+        message: Cow<'a, str>,
+    },
+    /// End-of-stream marker. Emitted exactly once after all per-CID events,
+    /// only on natural completion (not on `bitswap_unstable_unstream`
+    /// cancellation or client disconnect).
+    StreamDone,
 }
 
 impl serde::Serialize for RpcMethods {
@@ -1294,5 +1534,245 @@ mod tests {
                 }
             })
         ));
+    }
+
+    #[test]
+    fn statement_submit_parse_valid() {
+        let (id, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":1,"method":"statement_submit","params":["0x1234"]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(id, "1");
+        assert!(matches!(call, super::MethodCall::statement_submit { .. }));
+    }
+
+    #[test]
+    fn statement_submit_result_serialization() {
+        use super::{InternalError, InvalidReason, StatementSubmitResult};
+
+        let new = StatementSubmitResult::New;
+        assert_eq!(serde_json::to_string(&new).unwrap(), r#"{"status":"new"}"#);
+
+        let invalid = StatementSubmitResult::Invalid {
+            reason: InvalidReason::Encoding,
+        };
+        assert_eq!(
+            serde_json::to_string(&invalid).unwrap(),
+            r#"{"status":"invalid","reason":"Invalid statement encoding"}"#
+        );
+
+        let internal = StatementSubmitResult::InternalError {
+            error: InternalError::NoConnectedPeers,
+        };
+        assert_eq!(
+            serde_json::to_string(&internal).unwrap(),
+            r#"{"status":"internalError","error":"No connected peers"}"#
+        );
+
+        // Round-trips: the typed fields deserialize back from their wire strings.
+        for value in [new, invalid, internal] {
+            let json = serde_json::to_string(&value).unwrap();
+            assert_eq!(
+                serde_json::from_str::<StatementSubmitResult>(&json).unwrap(),
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn statement_event_serialization() {
+        let event = super::StatementEvent::NewStatements {
+            statements: vec![super::HexString(vec![0x12, 0x34])],
+            remaining: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"event":"newStatements","data":{"statements":["0x1234"]}}"#
+        );
+
+        let event_with_remaining = super::StatementEvent::NewStatements {
+            statements: vec![super::HexString(vec![0xab])],
+            remaining: Some(5),
+        };
+        assert_eq!(
+            serde_json::to_string(&event_with_remaining).unwrap(),
+            r#"{"event":"newStatements","data":{"statements":["0xab"],"remaining":5}}"#
+        );
+    }
+
+    #[test]
+    fn statement_subscribe_parse_any() {
+        let (id, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":2,"method":"statement_subscribeStatement","params":["any"]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(id, "2");
+        assert!(matches!(
+            call,
+            super::MethodCall::statement_subscribeStatement {
+                filter: super::TopicFilter::Any
+            }
+        ));
+    }
+
+    #[test]
+    fn statement_subscribe_parse_match_any() {
+        let (id, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":2,"method":"statement_subscribeStatement","params":[{"matchAny":["0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(id, "2");
+        assert!(matches!(
+            call,
+            super::MethodCall::statement_subscribeStatement {
+                filter: super::TopicFilter::MatchAny(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn statement_subscribe_parse_match_all() {
+        let (id, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":2,"method":"statement_subscribeStatement","params":[{"matchAll":["0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(id, "2");
+        assert!(matches!(
+            call,
+            super::MethodCall::statement_subscribeStatement {
+                filter: super::TopicFilter::MatchAll(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn statement_unsubscribe_parse_valid() {
+        let (id, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":4,"method":"statement_unsubscribeStatement","params":["sub123"]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(id, "4");
+        assert!(matches!(
+            call,
+            super::MethodCall::statement_unsubscribeStatement { .. }
+        ));
+    }
+
+    #[test]
+    fn topic_filter_any_matches_everything() {
+        let filter = super::TopicFilter::Any;
+        assert!(filter.matches(&[]));
+        let topic = [1u8; 32];
+        assert!(filter.matches(&[topic]));
+    }
+
+    #[test]
+    fn topic_filter_match_any_empty_returns_false() {
+        let filter = super::TopicFilter::match_any(Vec::new()).unwrap();
+        let topic = [1u8; 32];
+        assert!(!filter.matches(&[topic]));
+        assert!(!filter.matches(&[]));
+    }
+
+    #[test]
+    fn topic_filter_match_any_with_overlap() {
+        let t1 = [1u8; 32];
+        let t2 = [2u8; 32];
+        let t3 = [3u8; 32];
+        let filter = super::TopicFilter::match_any(vec![t1, t2]).unwrap();
+        assert!(filter.matches(&[t1]));
+        assert!(filter.matches(&[t2]));
+        assert!(filter.matches(&[t3, t1]));
+        assert!(!filter.matches(&[t3]));
+        assert!(!filter.matches(&[]));
+    }
+
+    #[test]
+    fn topic_filter_match_all() {
+        let t1 = [1u8; 32];
+        let t2 = [2u8; 32];
+        let t3 = [3u8; 32];
+        let filter = super::TopicFilter::match_all(vec![t1, t2]).unwrap();
+        assert!(filter.matches(&[t1, t2]));
+        assert!(filter.matches(&[t1, t2, t3]));
+        assert!(!filter.matches(&[t1]));
+        assert!(!filter.matches(&[t2]));
+        assert!(!filter.matches(&[t3]));
+        assert!(!filter.matches(&[]));
+    }
+
+    #[test]
+    fn topic_filter_match_all_empty_matches_everything() {
+        let filter = super::TopicFilter::match_all(Vec::new()).unwrap();
+        assert!(filter.matches(&[]));
+        assert!(filter.matches(&[[1u8; 32]]));
+    }
+
+    #[test]
+    fn topic_filter_match_all_rejects_too_many_topics() {
+        let topics: Vec<[u8; 32]> = (0..=crate::network::codec::MAX_TOPICS)
+            .map(|i| [i as u8; 32])
+            .collect();
+        assert!(super::TopicFilter::match_all(topics).is_err());
+    }
+
+    #[test]
+    fn topic_filter_match_any_rejects_too_many_topics() {
+        let topics: Vec<[u8; 32]> = (0..=crate::network::codec::MAX_ANY_TOPICS)
+            .map(|i| [i as u8; 32])
+            .collect();
+        assert!(super::TopicFilter::match_any(topics).is_err());
+    }
+
+    #[test]
+    fn bitswap_stream_event_stream_item_serialization() {
+        // Spec: `{"event":"streamItem","cid":"...","value":"0x..."}` — flat object, no nesting.
+        let evt = super::BitswapStreamEvent::StreamItem {
+            cid: "abc".into(),
+            value: super::HexString(vec![0x48, 0x69]),
+        };
+        assert_eq!(
+            serde_json::to_string(&evt).unwrap(),
+            r#"{"event":"streamItem","cid":"abc","value":"0x4869"}"#
+        );
+    }
+
+    #[test]
+    fn bitswap_stream_event_stream_item_error_serialization() {
+        // Spec: `code` and `message` appear at the top level of `result`, alongside `event` and
+        // `cid`. They are NOT nested under a sub-object.
+        let evt = super::BitswapStreamEvent::StreamItemError {
+            cid: "abc".into(),
+            code: -32811,
+            message: "request timeout".into(),
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(
+            json,
+            r#"{"event":"streamItemError","cid":"abc","code":-32811,"message":"request timeout"}"#
+        );
+        // Belt-and-braces: assert the structure explicitly so a future serde change that
+        // accidentally re-nests is caught.
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"], "streamItemError");
+        assert_eq!(parsed["cid"], "abc");
+        assert_eq!(parsed["code"], -32811);
+        assert!(parsed["message"].is_string());
+        assert!(parsed.get("data").is_none());
+    }
+
+    #[test]
+    fn bitswap_stream_event_stream_done_serialization() {
+        // Spec: `{"event":"streamDone"}` — no other fields.
+        let evt = super::BitswapStreamEvent::StreamDone;
+        assert_eq!(
+            serde_json::to_string(&evt).unwrap(),
+            r#"{"event":"streamDone"}"#
+        );
     }
 }

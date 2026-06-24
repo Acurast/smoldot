@@ -23,12 +23,22 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      npm_tag_suffix:
+        description: 'Optional dev dist-tag suffix. Empty → "dev-<YYYYMMDD>"; else "dev-<YYYYMMDD>-<suffix>". Charset: [A-Za-z0-9-].'
+        type: string
+        required: false
+        default: ''
 
 # TODO: improve the security of this module
 permissions: read-all
 
 jobs:
   build-push-docker-image:
+    # Docker image publishing is not supported at the moment.
+    # Note: add build-push-docker-image back to 'all-deploy` needs list if it is re-enabled.
+    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -36,8 +46,8 @@ jobs:
     steps:
     - uses: docker/setup-qemu-action@v3
     - uses: docker/setup-buildx-action@v3
-    - uses: actions/checkout@v4
-    - uses: docker/login-action@v3 
+    - uses: actions/checkout@v6
+    - uses: docker/login-action@v3
       # This `if` adds an additional safety against accidental pushes.
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       with:
@@ -54,15 +64,16 @@ jobs:
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
   build-js-doc:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           path: repo
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v4.2.0
+      - uses: actions/setup-node@v6.1.0
         with:
           node-version: current
       - run: npm install
@@ -75,17 +86,18 @@ jobs:
       - run: |
           mkdir -p ./doc
           mv ./repo/wasm-node/javascript/dist/doc/* ./doc
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: javascript-documentation
           path: ./doc/
 
   build-rust-doc:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           path: repo
       - uses: Swatinem/rust-cache@v2
@@ -96,19 +108,20 @@ jobs:
       - run: |
           mkdir -p ./doc
           mv ./repo/target/doc/* ./doc
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: rust-documentation
           path: ./doc/
 
   build-tests-coverage:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
       - run: apt update && apt install -y jq
       - run: rustup component add llvm-tools-preview
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           path: repo
       - uses: Swatinem/rust-cache@v2
@@ -123,18 +136,19 @@ jobs:
           `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata merge -sparse ./coverage/default_*.profraw -o ./coverage/tests-coverage.profdata
           `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov show --format=html --output-dir=./html-out --instr-profile=./coverage/tests-coverage.profdata --ignore-filename-regex='cargo/registry' --ignore-filename-regex='/rustc/' --show-instantiations --show-line-counts-or-regions $(for file in `cat ./coverage/binaries-list`; do printf "%s %s " -object $file; done)
           `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov report --instr-profile=./coverage/tests-coverage.profdata --ignore-filename-regex='cargo/registry' --ignore-filename-regex='/rustc/' $(for file in `cat ./coverage/binaries-list`; do printf "%s %s " -object $file; done)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: code-coverage-report
           path: ./html-out/
 
   docs-publish:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     needs: [build-js-doc, build-rust-doc, build-tests-coverage]
     permissions:
       contents: write   # Necessary to push on the `gh-pages` branch.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           path: repo
       - run: |
@@ -142,15 +156,15 @@ jobs:
           mkdir -p ./upload/doc-rust
           mkdir -p ./upload/tests-coverage
           touch ./upload/.nojekyll
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: javascript-documentation
           path: ./upload/doc-javascript
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: rust-documentation
           path: ./upload/doc-rust
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: code-coverage-report
           path: ./upload/tests-coverage
@@ -174,40 +188,108 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v4.2.0
+      - uses: actions/setup-node@v6.1.0
         with:
           # Set to the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
           node-version: 18
       - uses: Swatinem/rust-cache@v2
-      - run: npm install
+
+      # On workflow_dispatch: compute a unique dev version and a safe dist-tag,
+      # then rewrite them in-place into package.json and wasm-node/rust/Cargo.toml
+      # (never committed). On push-to-main this step is skipped; the committed
+      # versions are published to the default dist-tag (`latest`).
+      - name: Compute dev version and dist-tag
+        if: github.event_name == 'workflow_dispatch'
+        id: devver
+        shell: bash
+        run: |
+          apt-get update -qq && apt-get install -y -qq jq
+          SUFFIX='${{ inputs.npm_tag_suffix }}'
+          # Empty suffix is allowed; non-empty must match the charset.
+          if [[ -n "$SUFFIX" && ! "$SUFFIX" =~ ^[A-Za-z0-9-]+$ ]]; then
+            echo "::error::npm_tag_suffix must match [A-Za-z0-9-]+ or be empty"
+            exit 1
+          fi
+          BASE=$(jq -r .version wasm-node/javascript/package.json)
+          STABLE=${BASE%%-*}
+          IFS='.' read -r MA MI PA <<< "$STABLE"
+          # Always bump patch. Semver-safe: <next-patch>-dev.X sorts below any
+          # future stable (patch, minor, or major) regardless of what the real
+          # next release ends up being. If you ever need minor/major dev
+          # prereleases, add a `bump` workflow input.
+          NEXT="$MA.$MI.$((PA+1))"
+
+          DATE=$(date -u +%Y%m%d)
+
+          # Build the "dev[-<suffix>]" portion once, shared by version and tag.
+          if [[ -z "$SUFFIX" ]]; then
+            TAG="dev-${DATE}"
+          else
+            TAG="dev-${DATE}-${SUFFIX}"
+          fi
+          # Version's first prerelease identifier is the tag; "." + numeric N
+          # is a second identifier so that N sorts numerically.
+          PREFIX="${NEXT}-${TAG}"
+          # `grep || true`: on the first dev release of the day no version matches
+          # the prefix; grep exits 1 which under `set -e -o pipefail` would kill the step.
+          MAX_N=$(
+            npm view --json smoldot versions 2>/dev/null \
+              | jq -r '.[]' \
+              | { grep -E "^${PREFIX}\.[0-9]+$" || true; } \
+              | sed -E "s|^${PREFIX}\.||" \
+              | sort -n | tail -1
+          )
+          N=$(( ${MAX_N:--1} + 1 ))
+          VERSION="${PREFIX}.${N}"
+          jq --arg v "$VERSION" '.version=$v' wasm-node/javascript/package.json > _pj \
+            && mv _pj wasm-node/javascript/package.json
+          sed -i -E '0,/^version = "[^"]+"/s//version = "'"$VERSION"'"/' wasm-node/rust/Cargo.toml
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "Computed: $VERSION → dist-tag $TAG"
+
+      - name: Install
+        run: npm install
         working-directory: ./wasm-node/javascript
-      - run: npm publish --unsafe-perm --dry-run
+
+      - name: Pack
+        run: npm pack
         working-directory: ./wasm-node/javascript
-      - uses: JS-DevTools/npm-publish@v3
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        # Warning: this GitHub action doesn't seem to run prepublish scripts, hence
-        # the `npm publish --dry-run` done right above is important to ensure this.
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
         with:
-          token: ${{ secrets.NPM_TOKEN }}
-          package: ./wasm-node/javascript/package.json
-          access: public
+          name: npm-package-${{ github.sha }}
+          path: ./wasm-node/javascript/*.tgz
+      - name: Publish via npm_publish_automation
+        uses: octokit/request-action@v2.x
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' }}
+        with:
+          route: POST /repos/paritytech/npm_publish_automation/actions/workflows/publish.yml/dispatches
+          ref: main
+          # Empty npm_tag on push-to-main → automation omits `--tag` → npm defaults to `latest`.
+          # On workflow_dispatch → steps.devver.outputs.tag is non-empty.
+          inputs: '${{ format(''{{ "repo": "{0}", "run_id": "{1}", "artifact_name": "npm-package-{2}", "npm_tag": "{3}" }}'', github.repository, github.run_id, github.sha, steps.devver.outputs.tag) }}'
+        env:
+          GITHUB_TOKEN: ${{ secrets.NPM_PUBLISH_AUTOMATION_TOKEN }}
 
   deno-publish:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write   # Necessary in order to push tags.
     # This action checks if a certain git tag exists. If not, it compiles the JavaScript package,
     # then commits the compilation artifacts, tags the commit, and pushes the tag.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0   # Necessary below for checking if the tag exists.
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v4.2.0
+      - uses: actions/setup-node@v6.1.0
         with:
           # Set to the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
           node-version: 18
@@ -243,11 +325,12 @@ jobs:
         if: ${{ steps.check-tag-exists.outputs.num-existing == 0 && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
   crates-io-publish:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: cargo publish --dry-run --locked
         working-directory: ./lib
         # Note that no dry run is performed for the crates that have dependencies towards the
@@ -264,15 +347,114 @@ jobs:
         working-directory: ./light-base
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         continue-on-error: true
-      - run: cargo publish --no-verify
-        working-directory: ./full-node
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        continue-on-error: true
+
+  tags-publish:
+    # Pushes `npm-smoldot-v…`, `smoldot-v…`, `smoldot-light-v…` — each only
+    # after the version is found on its registry. Guards against publish
+    # steps' `continue-on-error: true` letting a tag through on failure.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [npm-publish, deno-publish, crates-io-publish]
+    # Serialize runs to avoid `git push` races on the same new tag.
+    concurrency:
+      group: tags-publish
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # to push tags
+    steps:
+      - uses: actions/checkout@v6
+      - id: tags
+        name: Compute and validate tag names
+        run: |
+          set -euo pipefail
+          NPM_VER=$(jq -r .version ./wasm-node/javascript/package.json)
+          SMOLDOT_VER=$(cargo read-manifest --manifest-path=./lib/Cargo.toml        | jq -r .version)
+          LIGHT_VER=$(cargo  read-manifest --manifest-path=./light-base/Cargo.toml  | jq -r .version)
+          for v in "$NPM_VER" "$SMOLDOT_VER" "$LIGHT_VER"; do
+            [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] \
+              || { echo "::error::version files did not yield a semver: '$v'"; exit 1; }
+          done
+          {
+            echo "npm_ver=$NPM_VER"
+            echo "smoldot_ver=$SMOLDOT_VER"
+            echo "light_ver=$LIGHT_VER"
+            echo "npm=npm-smoldot-v$NPM_VER"
+            echo "smoldot=smoldot-v$SMOLDOT_VER"
+            echo "light=smoldot-light-v$LIGHT_VER"
+          } >> "$GITHUB_OUTPUT"
+          printf 'Computed tags:\n  npm-smoldot-v%s\n  smoldot-v%s\n  smoldot-light-v%s\n' \
+            "$NPM_VER" "$SMOLDOT_VER" "$LIGHT_VER"
+      - name: Push verified release tags
+        env:
+          NPM_VER:     ${{ steps.tags.outputs.npm_ver }}
+          SMOLDOT_VER: ${{ steps.tags.outputs.smoldot_ver }}
+          LIGHT_VER:   ${{ steps.tags.outputs.light_ver }}
+          NPM_TAG:     ${{ steps.tags.outputs.npm }}
+          SMOLDOT_TAG: ${{ steps.tags.outputs.smoldot }}
+          LIGHT_TAG:   ${{ steps.tags.outputs.light }}
+        run: |
+          set -euo pipefail
+          # crates.io requires a contact-bearing User-Agent.
+          UA="smoldot-release-ci (https://github.com/${{ github.repository }})"
+
+          # Registries are eventually-consistent; retry up to 3 min per check.
+          retry() {
+            local i; for i in 1 2 3 4 5 6; do
+              "$@" && return 0
+              sleep 30
+            done
+            return 1
+          }
+
+          npm_has() {
+            local code
+            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              "https://registry.npmjs.org/smoldot/$1")
+            [[ "$code" == "200" ]]
+          }
+          crate_has() {
+            curl -fsS -A "$UA" "https://crates.io/api/v1/crates/$1/$2" \
+              | jq -e --arg v "$2" '.version.num == $v' >/dev/null
+          }
+          remote_tag_exists() {
+            [[ -n "$(git ls-remote --tags origin "refs/tags/$1")" ]]
+          }
+          push_tag() {
+            local tag="$1"
+            if remote_tag_exists "$tag"; then
+              echo "Tag $tag already exists on remote; skipping."
+              return
+            fi
+            git tag "$tag"
+            git push origin "$tag"
+            echo "Pushed: $tag -> $(git rev-parse HEAD)"
+          }
+
+          FAILED=0
+          if retry npm_has "$NPM_VER"; then
+            push_tag "$NPM_TAG"
+          else
+            echo "::error::smoldot@$NPM_VER not found on npm after retries; not tagging $NPM_TAG"
+            FAILED=1
+          fi
+          if retry crate_has smoldot "$SMOLDOT_VER"; then
+            push_tag "$SMOLDOT_TAG"
+          else
+            echo "::error::smoldot v$SMOLDOT_VER not found on crates.io after retries; not tagging $SMOLDOT_TAG"
+            FAILED=1
+          fi
+          if retry crate_has smoldot-light "$LIGHT_VER"; then
+            push_tag "$LIGHT_TAG"
+          else
+            echo "::error::smoldot-light v$LIGHT_VER not found on crates.io after retries; not tagging $LIGHT_TAG"
+            FAILED=1
+          fi
+          exit "$FAILED"
 
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [build-push-docker-image, docs-publish, npm-publish, deno-publish, crates-io-publish]
+    needs: [docs-publish, npm-publish, deno-publish, crates-io-publish, tags-publish]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success

@@ -2108,8 +2108,35 @@ impl ReadyToRun {
                     },
                 }
             }
-            HostFunction::ext_trie_blake2_256_verify_proof_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_trie_blake2_256_verify_proof_version_2 => host_fn_not_implemented!(),
+            HostFunction::ext_trie_blake2_256_verify_proof_version_1
+            | HostFunction::ext_trie_blake2_256_verify_proof_version_2 => {
+                let state_version = if matches!(
+                    host_fn,
+                    HostFunction::ext_trie_blake2_256_verify_proof_version_2
+                ) {
+                    expect_state_version!(4)
+                } else {
+                    TrieEntryVersion::V0
+                };
+
+                let root = expect_pointer_constant_size!(0, 32);
+                let proof = expect_pointer_size!(1).as_ref().to_vec();
+                let key = expect_pointer_size!(2).as_ref().to_vec();
+                let value = expect_pointer_size!(3).as_ref().to_vec();
+
+                let outcome = trie::proof_decode::verify_compact_trie_proof(
+                    &proof,
+                    &root,
+                    &key,
+                    &value,
+                    state_version,
+                );
+
+                HostVm::ReadyToRun(ReadyToRun {
+                    resume_value: Some(vm::WasmValue::I32(if outcome { 1 } else { 0 })),
+                    inner: self.inner,
+                })
+            }
             HostFunction::ext_trie_keccak_256_verify_proof_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_trie_keccak_256_verify_proof_version_2 => host_fn_not_implemented!(),
             HostFunction::ext_misc_print_num_version_1 => {
@@ -2290,6 +2317,27 @@ impl ReadyToRun {
                     },
                 }
             }
+            HostFunction::ext_transaction_index_index_version_1 => {
+                // Substrate uses these to maintain an offchain index of stored chunks served
+                // over Bitswap; smoldot doesn't store chunks at all, so the call is a no-op.
+                // Params still need to be consumed so the wasm VM doesn't fault on the
+                // `expect_*` arity-or-type mismatch the previous code triggered.
+                let _extrinsic_index = expect_u32!(0);
+                let _content_size = expect_u32!(1);
+                let _content_hash = expect_pointer_constant_size!(2, 32);
+                HostVm::ReadyToRun(ReadyToRun {
+                    inner: self.inner,
+                    resume_value: None,
+                })
+            }
+            HostFunction::ext_transaction_index_renew_version_1 => {
+                let _extrinsic_index = expect_u32!(0);
+                let _content_hash = expect_pointer_constant_size!(1, 32);
+                HostVm::ReadyToRun(ReadyToRun {
+                    inner: self.inner,
+                    resume_value: None,
+                })
+            }
         }
     }
 }
@@ -2340,7 +2388,7 @@ pub struct ExternalStorageGet {
     inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`].
     calling: usize,
 
     /// Used only for the `ext_storage_read_version_1` function. Stores the pointer where the
@@ -2741,7 +2789,7 @@ impl fmt::Debug for ExternalStorageAppend {
 pub struct ExternalStorageClearPrefix {
     inner: Box<Inner>,
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`].
     calling: usize,
 
     /// Pointer and size to the prefix. `None` if `&[]`. Guaranteed to be in range.
@@ -2854,7 +2902,7 @@ pub struct ExternalStorageRoot {
     inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`].
     calling: usize,
 
     /// Pointer and size of the child trie, if any. Guaranteed to be in range.
@@ -3371,7 +3419,7 @@ pub struct ExternalOffchainStorageGet {
     inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`].
     calling: usize,
 
     /// Pointer to the key whose value must be loaded. Guaranteed to be in range.
@@ -3445,7 +3493,7 @@ pub struct OffchainRandomSeed {
     inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`].
     calling: usize,
 }
 
@@ -3472,7 +3520,7 @@ pub struct OffchainSubmitTransaction {
     inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`].
     calling: usize,
 
     /// Pointer to the transaction whose value must be set. Guaranteed to be in range.

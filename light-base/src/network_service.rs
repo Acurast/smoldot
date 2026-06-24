@@ -54,7 +54,7 @@ use alloc::{
     sync::Arc,
     vec::{self, Vec},
 };
-use core::{cmp, mem, num::NonZero, pin::Pin, time::Duration};
+use core::{cmp, mem, num::NonZero, num::NonZeroUsize, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{StreamExt as _, future, stream};
@@ -69,11 +69,62 @@ use smoldot::{
         multiaddr::{self, Multiaddr},
         peer_id,
     },
-    network::{basic_peering_strategy, codec, service},
+    network::{basic_peering_strategy, bitswap_peering_strategy, codec, service},
 };
 
-pub use codec::{CallProofRequestConfig, Role};
-pub use service::{ChainId, EncodedMerkleProof, PeerId, QueueNotificationError};
+pub use codec::{AffinityFilter, CallProofRequestConfig, Role};
+use service::SendTopicAffinityError;
+pub use service::{
+    ChainId, EncodedMerkleProof, PeerId, QueueNotificationError, SendBitswapMessageError,
+};
+
+/// Configuration for the Statement Store protocol.
+#[derive(Debug, Clone)]
+pub struct StatementProtocolConfig {
+    /// Per-subscription LRU cache size used for deduplicating delivered statements.
+    max_seen_statements: NonZeroUsize,
+    false_positive_rate: f64,
+    bloom_seed: u128,
+    affinity_update_interval: Duration,
+}
+
+impl StatementProtocolConfig {
+    pub fn new(
+        max_seen_statements: NonZeroUsize,
+        false_positive_rate: f64,
+        bloom_seed: u128,
+        affinity_update_interval: Duration,
+    ) -> Self {
+        assert!(
+            false_positive_rate.is_finite()
+                && false_positive_rate > 0.0
+                && false_positive_rate < 1.0
+        );
+        assert!(!affinity_update_interval.is_zero());
+        StatementProtocolConfig {
+            max_seen_statements,
+            false_positive_rate,
+            bloom_seed,
+            affinity_update_interval,
+        }
+    }
+
+    pub fn max_seen_statements(&self) -> NonZeroUsize {
+        self.max_seen_statements
+    }
+
+    pub fn false_positive_rate(&self) -> f64 {
+        self.false_positive_rate
+    }
+
+    pub fn bloom_seed(&self) -> u128 {
+        self.bloom_seed
+    }
+
+    pub fn affinity_update_interval(&self) -> Duration {
+        self.affinity_update_interval
+    }
+}
 
 mod tasks;
 
@@ -134,6 +185,9 @@ pub struct ConfigChain {
     /// Must be `Some` if and only if the chain uses the GrandPa networking protocol. Contains the
     /// number of the finalized block at the time of the initialization.
     pub grandpa_protocol_finalized_block_height: Option<u64>,
+
+    /// If `Some`, enables the statement store protocol.
+    pub statement_protocol_config: Option<StatementProtocolConfig>,
 }
 
 pub struct NetworkService<TPlat: PlatformRef> {
@@ -152,7 +206,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let network = service::ChainNetwork::new(service::Config {
             chains_capacity: config.chains_capacity,
             connections_capacity: 32,
-            handshake_timeout: Duration::from_secs(8),
+            // Shortened from 8s: parallel dials hold slots until this fires.
+            handshake_timeout: Duration::from_secs(4),
             randomness_seed: {
                 let mut seed = [0; 32];
                 config.platform.fill_random_bytes(&mut seed);
@@ -182,6 +237,16 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     chains_capacity: config.chains_capacity,
                 },
             ),
+            bitswap_peering_strategy: bitswap_peering_strategy::BitswapPeeringStrategy::new(
+                bitswap_peering_strategy::Config {
+                    randomness_seed: {
+                        let mut seed = [0; 32];
+                        config.platform.fill_random_bytes(&mut seed);
+                        seed
+                    },
+                    peers_capacity: 50, // TODO: hardcoded to the same value as `peering_strategy`.
+                },
+            ),
             network,
             connections_open_pool_size: config.connections_open_pool_size,
             connections_open_pool_restore_delay: config.connections_open_pool_restore_delay,
@@ -189,16 +254,24 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             next_recent_connection_restore: None,
             platform: config.platform.clone(),
             open_gossip_links: BTreeMap::new(),
+            chains_ever_gossip_connected: HashSet::with_capacity_and_hasher(4, Default::default()),
+            v2_statement_peers: HashMap::with_capacity_and_hasher(4, Default::default()),
+            current_affinity_filter: HashMap::with_capacity_and_hasher(4, Default::default()),
             event_pending_send: None,
             event_senders: either::Left(Vec::new()),
             pending_new_subscriptions: Vec::new(),
-            important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
+            bitswap_event_pending_send: None,
+            bitswap_connected_peers: 0,
+            bitswap_event_senders: either::Left(Vec::new()),
+            pending_new_bitswap_subscriptions: Vec::new(),
+            important_nodes: HashMap::with_capacity_and_hasher(16, Default::default()),
             main_messages_rx: Box::pin(main_messages_rx),
             messages_rx: stream::SelectAll::new(),
             blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+            child_storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             chains_by_next_discovery: BTreeMap::new(),
         }));
 
@@ -234,6 +307,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                         set_id: 0,
                     },
                 ),
+                enable_statement_protocol: config.statement_protocol_config.is_some(),
                 fork_id: config.fork_id.clone(),
                 block_number_bytes: config.block_number_bytes,
                 best_hash: config.best_block.1,
@@ -305,16 +379,37 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     /// If `None` is yielded and the [`NetworkService`] is still alive, you should call
     /// [`NetworkServiceChain::subscribe`] again to obtain a new `Receiver`.
     ///
-    /// # Panic
-    ///
-    /// Panics if the given [`ChainId`] is invalid.
-    ///
     // TODO: consider not killing the background until the channel is destroyed, as that would be a more sensical behaviour
     pub async fn subscribe(&self) -> async_channel::Receiver<Event> {
         let (tx, rx) = async_channel::bounded(128);
 
         self.messages_tx
             .send(ToBackgroundChain::Subscribe { sender: tx })
+            .await
+            .unwrap();
+
+        rx
+    }
+
+    /// Subscribes to the Bitswap events that happen on the network. Bitswap events subscription is
+    /// separate from other network service events, because Bitswap events are big and are not
+    /// needed by the most of subscribers.
+    ///
+    /// Note that this function is `async`, but it should return very quickly.
+    ///
+    /// The `Receiver` **must** be polled continuously. When the channel is full, the networking
+    /// connections will be back-pressured until the channel isn't full anymore.
+    ///
+    /// The `Receiver` never yields `None` unless the [`NetworkService`] crashes or is destroyed.
+    /// If `None` is yielded and the [`NetworkService`] is still alive, you should call
+    /// [`NetworkServiceChain::subscribe_bitswap`] again to obtain a new `Receiver`.
+    ///
+    // TODO: the last section of the doc seem to contradict itself.
+    pub async fn subscribe_bitswap(&self) -> async_channel::Receiver<BitswapEvent> {
+        let (tx, rx) = async_channel::bounded(128);
+
+        self.messages_tx
+            .send(ToBackgroundChain::SubscribeBitswap { sender: tx })
             .await
             .unwrap();
 
@@ -474,6 +569,38 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
+    /// Sends a child storage proof request to the given peer.
+    pub async fn child_storage_proof_request(
+        self: Arc<Self>,
+        target: PeerId,
+        config: codec::ChildStorageProofRequestConfig<
+            impl AsRef<[u8]> + Clone,
+            impl Iterator<Item = impl AsRef<[u8]> + Clone>,
+        >,
+        timeout: Duration,
+    ) -> Result<service::EncodedMerkleProof, ChildStorageProofRequestError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.messages_tx
+            .send(ToBackgroundChain::StartChildStorageProofRequest {
+                target: target.clone(),
+                config: ChildStorageProofRequestConfigOwned {
+                    block_hash: config.block_hash,
+                    child_trie: config.child_trie.as_ref().to_vec(),
+                    keys: config
+                        .keys
+                        .map(|key| key.as_ref().to_vec())
+                        .collect::<Vec<_>>(),
+                },
+                timeout,
+                result: tx,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
     /// Announces transaction to the peers we are connected to.
     ///
     /// Returns a list of peers that we have sent the transaction to. Can return an empty `Vec`
@@ -517,6 +644,75 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .unwrap();
 
         rx.await.unwrap()
+    }
+
+    /// Send Bitswap message to the given peer.
+    pub async fn send_bitswap_message(
+        &self,
+        target: PeerId,
+        message: Vec<u8>,
+    ) -> Result<(), SendBitswapMessageError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.messages_tx
+            .send(ToBackgroundChain::SendBitswapMessage {
+                target,
+                message,
+                result: tx,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    /// Broadcast Bitswap message to all [`service::ChainNetwork::established_bitswap_desired`]
+    /// peers.
+    ///
+    /// Returns the peers message was broadcast to or an error if the message cannot be sent
+    /// to at least one peer.
+    // TODO: better use a dedicated error type instead of reusing a lower-level
+    // `SendBitswapMessageErorr`.
+    pub async fn broadcast_bitswap_message(
+        &self,
+        message: Vec<u8>,
+    ) -> Result<Vec<PeerId>, SendBitswapMessageError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.messages_tx
+            .send(ToBackgroundChain::BroadcastBitswapMessage {
+                message,
+                result: tx,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    /// Broadcast a statement notification to all gossip-connected peers.
+    pub async fn broadcast_statement(
+        self: Arc<Self>,
+        statement: Vec<u8>,
+    ) -> BroadcastStatementResult {
+        let (tx, rx) = oneshot::channel();
+
+        self.messages_tx
+            .send(ToBackgroundChain::BroadcastStatement {
+                statement,
+                result: tx,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    pub async fn update_topic_affinity(&self, filter: AffinityFilter) {
+        self.messages_tx
+            .send(ToBackgroundChain::UpdateTopicAffinity { filter })
+            .await
+            .unwrap();
     }
 
     /// Marks the given peers as belonging to the given chain, and adds some addresses to these
@@ -579,6 +775,12 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct BroadcastStatementResult {
+    pub sent: usize,
+    pub total: usize,
+}
+
 /// Event that can happen on the network service.
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -603,6 +805,22 @@ pub enum Event {
     GrandpaCommitMessage {
         peer_id: PeerId,
         message: service::EncodedGrandpaCommitMessage,
+    },
+    /// Received a statement notification from the network.
+    StatementsNotification {
+        peer_id: PeerId,
+        statements: Vec<([u8; 32], codec::Statement)>,
+    },
+}
+
+/// Bitswap event that can be generated by the network service. Because Bitswap messages are big
+/// (up to 2 MiB) and can be delivered at high rate, we use a dedicated subscriber to not copy them
+/// to all network service subscribers.
+#[derive(Debug, Clone)]
+pub enum BitswapEvent {
+    BitswapMessage {
+        peer_id: PeerId,
+        message: service::EncodedBitswapMessage,
     },
 }
 
@@ -662,6 +880,37 @@ impl CallProofRequestError {
     }
 }
 
+/// Error returned by [`NetworkServiceChain::child_storage_proof_request`].
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
+pub enum ChildStorageProofRequestError {
+    /// No established connection with the target.
+    NoConnection,
+    /// Child storage proof request is too large and can't be sent.
+    RequestTooLarge,
+    /// Error during the request.
+    #[display("{_0}")]
+    Request(service::StorageProofRequestError),
+}
+
+impl ChildStorageProofRequestError {
+    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
+    /// issue.
+    pub fn is_network_problem(&self) -> bool {
+        match self {
+            ChildStorageProofRequestError::Request(err) => err.is_network_problem(),
+            ChildStorageProofRequestError::RequestTooLarge => false,
+            ChildStorageProofRequestError::NoConnection => true,
+        }
+    }
+}
+
+/// Owned version of [`codec::ChildStorageProofRequestConfig`] for sending across channel.
+struct ChildStorageProofRequestConfigOwned {
+    block_hash: [u8; 32],
+    child_trie: Vec<u8>,
+    keys: Vec<Vec<u8>>,
+}
+
 enum ToBackground<TPlat: PlatformRef> {
     AddChain {
         messages_rx: async_channel::Receiver<ToBackgroundChain>,
@@ -673,6 +922,9 @@ enum ToBackgroundChain {
     RemoveChain,
     Subscribe {
         sender: async_channel::Sender<Event>,
+    },
+    SubscribeBitswap {
+        sender: async_channel::Sender<BitswapEvent>,
     },
     DisconnectAndBan {
         peer_id: PeerId,
@@ -708,6 +960,13 @@ enum ToBackgroundChain {
         timeout: Duration,
         result: oneshot::Sender<Result<service::EncodedMerkleProof, CallProofRequestError>>,
     },
+    // TODO: serialize the request before sending over channel
+    StartChildStorageProofRequest {
+        target: PeerId,
+        config: ChildStorageProofRequestConfigOwned,
+        timeout: Duration,
+        result: oneshot::Sender<Result<service::EncodedMerkleProof, ChildStorageProofRequestError>>,
+    },
     SetLocalBestBlock {
         best_hash: [u8; 32],
         best_number: u64,
@@ -724,6 +983,22 @@ enum ToBackgroundChain {
         scale_encoded_header: Vec<u8>,
         is_best: bool,
         result: oneshot::Sender<Result<(), QueueNotificationError>>,
+    },
+    SendBitswapMessage {
+        target: PeerId,
+        message: Vec<u8>,
+        result: oneshot::Sender<Result<(), SendBitswapMessageError>>,
+    },
+    BroadcastBitswapMessage {
+        message: Vec<u8>,
+        result: oneshot::Sender<Result<Vec<PeerId>, SendBitswapMessageError>>,
+    },
+    BroadcastStatement {
+        statement: Vec<u8>,
+        result: oneshot::Sender<BroadcastStatementResult>,
+    },
+    UpdateTopicAffinity {
+        filter: AffinityFilter,
     },
     Discover {
         list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
@@ -766,6 +1041,9 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// All known peers and their addresses.
     peering_strategy: basic_peering_strategy::BasicPeeringStrategy<ChainId, TPlat::Instant>,
 
+    /// Bitswap slot assignment strategy.
+    bitswap_peering_strategy: bitswap_peering_strategy::BitswapPeeringStrategy<TPlat::Instant>,
+
     /// See [`Config::connections_open_pool_size`].
     connections_open_pool_size: u32,
 
@@ -784,12 +1062,32 @@ struct BackgroundTask<TPlat: PlatformRef> {
     // TODO: using this data structure unfortunately means that PeerIds are cloned a lot, maybe some user data in ChainNetwork is better? not sure
     open_gossip_links: BTreeMap<(ChainId, PeerId), OpenGossipLinkState>,
 
-    /// List of nodes that are considered as important for logging purposes.
+    /// Chains for which a gossip link has been opened at least once. Used to prefer bootnodes for
+    /// out slots only until the chain first connects.
+    chains_ever_gossip_connected: HashSet<ChainId, fnv::FnvBuildHasher>,
+
+    /// Connected peers using statement protocol V2, per chain.
+    v2_statement_peers: HashMap<ChainId, HashSet<PeerId, fnv::FnvBuildHasher>, fnv::FnvBuildHasher>,
+
+    /// Current topic affinity filter per chain, sent to V2 peers on connect.
+    current_affinity_filter: HashMap<ChainId, AffinityFilter, fnv::FnvBuildHasher>,
+
+    /// Important nodes per chain (in practice the bootnodes; see [`NetworkServiceChain::discover`]).
+    /// They get extra logging, and slot preference until the chain first connects.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
-    important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
+    important_nodes: HashMap<ChainId, HashSet<PeerId, fnv::FnvBuildHasher>, fnv::FnvBuildHasher>,
 
     /// Event about to be sent on the senders of [`BackgroundTask::event_senders`].
     event_pending_send: Option<(ChainId, Event)>,
+
+    /// Bitswap event about to be sent on the senders of [`BackgroundTask::bitswap_event_senders`].
+    bitswap_event_pending_send: Option<BitswapEvent>,
+
+    /// Running count of peers with an open Bitswap substream. Maintained from
+    /// `service::Event::BitswapConnected` / `BitswapDisconnected`. Used for diagnostic logging
+    /// only; the authoritative per-peer state lives in
+    /// [`BackgroundTask::bitswap_peering_strategy`].
+    bitswap_connected_peers: usize,
 
     /// Sending events through the public API.
     ///
@@ -804,6 +1102,25 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Whenever [`NetworkServiceChain::subscribe`] is called, the new sender is added to this list.
     /// Once [`BackgroundTask::event_senders`] is ready, we properly initialize these senders.
     pending_new_subscriptions: Vec<(ChainId, async_channel::Sender<Event>)>,
+
+    /// Sending Bitswap events through the public API. We use separate channels for Bitswap events,
+    /// because Bitswap messages are big and only few of event subscribers are interested in them.
+    ///
+    /// Contains either senders, or a `Future` that is currently sending an event and will yield
+    /// the senders back once it is finished.
+    ///
+    /// Note that compared to `event_senders`, `bitswap_event_senders` are not associated with
+    /// chains, because Bitswap messages coming from the network do not have the information about
+    /// what chain they are coming from.
+    bitswap_event_senders: either::Either<
+        Vec<async_channel::Sender<BitswapEvent>>,
+        Pin<Box<dyn Future<Output = Vec<async_channel::Sender<BitswapEvent>>> + Send>>,
+    >,
+
+    /// Whenever [`NetworkServiceChain::subscribe_bitswap`] is called, the new sender is added to
+    /// this list. Once [`BackgroundTask::bitswap_event_senders`] is ready, we properly initialize
+    /// these senders.
+    pending_new_bitswap_subscriptions: Vec<async_channel::Sender<BitswapEvent>>,
 
     main_messages_rx: Pin<Box<async_channel::Receiver<ToBackground<TPlat>>>>,
 
@@ -831,6 +1148,12 @@ struct BackgroundTask<TPlat: PlatformRef> {
     call_proof_requests: HashMap<
         service::SubstreamId,
         oneshot::Sender<Result<service::EncodedMerkleProof, CallProofRequestError>>,
+        fnv::FnvBuildHasher,
+    >,
+
+    child_storage_proof_requests: HashMap<
+        service::SubstreamId,
+        oneshot::Sender<Result<service::EncodedMerkleProof, ChildStorageProofRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
@@ -879,9 +1202,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             MessageForChain(ChainId, ToBackgroundChain),
             NetworkEvent(service::Event<async_channel::Sender<service::CoordinatorToConnection>>),
             CanAssignSlot(PeerId, ChainId),
+            CanAssignBitswapSlot(PeerId),
             NextRecentConnectionRestore,
             CanStartConnect(PeerId),
             CanOpenGossip(PeerId, ChainId),
+            CanOpenBitswap(PeerId),
             MessageFromConnection {
                 connection_id: service::ConnectionId,
                 message: service::ConnectionToCoordinator,
@@ -891,6 +1216,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 message: service::CoordinatorToConnection,
             },
             EventSendersReady,
+            BitswapEventSendersReady,
             StartDiscovery(ChainId),
         }
 
@@ -920,7 +1246,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             };
             let service_event = async {
                 if let Some(event) = (task.event_pending_send.is_none()
-                    && task.pending_new_subscriptions.is_empty())
+                    && task.bitswap_event_pending_send.is_none()
+                    && task.pending_new_subscriptions.is_empty()
+                    && task.pending_new_bitswap_subscriptions.is_empty())
                 .then(|| task.network.next_event())
                 .flatten()
                 {
@@ -946,6 +1274,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     x
                 } {
                     WakeUpReason::CanOpenGossip(peer_id, chain_id)
+                } else if let Some(peer_id) = {
+                    let x = task
+                        .network
+                        .connected_unopened_bitswap_desired()
+                        .choose(&mut task.randomness)
+                        .cloned();
+                    x
+                } {
+                    WakeUpReason::CanOpenBitswap(peer_id)
                 } else if let Some((connection_id, message)) =
                     task.network.pull_message_to_connection()
                 {
@@ -966,10 +1303,30 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 continue;
                             }
 
-                            match task
-                                .peering_strategy
-                                .pick_assignable_peer(&chain_id, &task.platform.now())
-                            {
+                            let now = task.platform.now();
+
+                            // Until the chain first connects, prefer slots for important nodes
+                            // (the bootnodes); otherwise use the general pool.
+                            if !task.chains_ever_gossip_connected.contains(&chain_id) {
+                                if let basic_peering_strategy::AssignablePeer::Assignable(peer_id) =
+                                    task.peering_strategy.pick_assignable_peer_filtered(
+                                        &chain_id,
+                                        &now,
+                                        |peer_id| {
+                                            task.important_nodes
+                                                .get(&chain_id)
+                                                .map_or(false, |nodes| nodes.contains(peer_id))
+                                        },
+                                    )
+                                {
+                                    break 'search WakeUpReason::CanAssignSlot(
+                                        peer_id.clone(),
+                                        chain_id,
+                                    );
+                                }
+                            }
+
+                            match task.peering_strategy.pick_assignable_peer(&chain_id, &now) {
                                 basic_peering_strategy::AssignablePeer::Assignable(peer_id) => {
                                     break 'search WakeUpReason::CanAssignSlot(
                                         peer_id.clone(),
@@ -985,6 +1342,23 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 }
                                 basic_peering_strategy::AssignablePeer::NoPeer => continue,
                             }
+                        }
+
+                        match task
+                            .bitswap_peering_strategy
+                            .pick_assignable_peer(&task.platform.now())
+                        {
+                            bitswap_peering_strategy::AssignablePeer::Assignable(peer_id) => {
+                                break 'search WakeUpReason::CanAssignBitswapSlot(peer_id.clone());
+                            }
+                            bitswap_peering_strategy::AssignablePeer::AllPeersBanned {
+                                next_unban,
+                            } => {
+                                if earlier_unban.as_ref().map_or(true, |b| b > next_unban) {
+                                    earlier_unban = Some(next_unban.clone());
+                                }
+                            }
+                            bitswap_peering_strategy::AssignablePeer::NoPeer => {}
                         }
 
                         if let Some(earlier_unban) = earlier_unban {
@@ -1025,6 +1399,20 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     future::pending().await
                 }
             };
+            let finished_sending_bitswap_event = async {
+                if let either::Right(bitswap_event_sending_future) = &mut task.bitswap_event_senders
+                {
+                    let bitswap_event_senders = bitswap_event_sending_future.await;
+                    task.bitswap_event_senders = either::Left(bitswap_event_senders);
+                    WakeUpReason::BitswapEventSendersReady
+                } else if task.bitswap_event_pending_send.is_some()
+                    || !task.pending_new_bitswap_subscriptions.is_empty()
+                {
+                    WakeUpReason::BitswapEventSendersReady
+                } else {
+                    future::pending().await
+                }
+            };
             let start_discovery = async {
                 let Some(mut next_discovery) = task.chains_by_next_discovery.first_entry() else {
                     future::pending().await
@@ -1040,6 +1428,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 .or(service_event)
                 .or(next_recent_connection_restore)
                 .or(finished_sending_event)
+                .or(finished_sending_bitswap_event)
                 .or(start_discovery)
                 .await
         };
@@ -1158,6 +1547,30 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }));
                 }
             }
+            WakeUpReason::BitswapEventSendersReady => {
+                // We made sure that the senders were ready before generating an event.
+                let either::Left(bitswap_event_senders) = &mut task.bitswap_event_senders else {
+                    unreachable!()
+                };
+
+                if let Some(event_to_dispatch) = task.bitswap_event_pending_send.take() {
+                    let mut bitswap_event_senders = mem::take(bitswap_event_senders);
+                    task.bitswap_event_senders = either::Right(Box::pin(async move {
+                        // Elements in `bitswap_event_senders` are removed one by one and
+                        // inserted back if the channel is still open.
+                        for index in (0..bitswap_event_senders.len()).rev() {
+                            let event_sender = bitswap_event_senders.swap_remove(index);
+                            if event_sender.send(event_to_dispatch.clone()).await.is_err() {
+                                continue;
+                            }
+                            bitswap_event_senders.push(event_sender);
+                        }
+                        bitswap_event_senders
+                    }));
+                } else if !task.pending_new_bitswap_subscriptions.is_empty() {
+                    bitswap_event_senders.append(&mut task.pending_new_bitswap_subscriptions);
+                }
+            }
             WakeUpReason::MessageFromConnection {
                 connection_id,
                 message,
@@ -1203,11 +1616,21 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "chain-removed",
                     id = task.network[chain_id].log_name
                 );
+                task.v2_statement_peers.remove(&chain_id);
+                task.current_affinity_filter.remove(&chain_id);
+                task.important_nodes.remove(&chain_id);
+                task.chains_ever_gossip_connected.remove(&chain_id);
                 task.network.remove_chain(chain_id).unwrap();
                 task.peering_strategy.remove_chain_peers(&chain_id);
             }
             WakeUpReason::MessageForChain(chain_id, ToBackgroundChain::Subscribe { sender }) => {
                 task.pending_new_subscriptions.push((chain_id, sender));
+            }
+            WakeUpReason::MessageForChain(
+                _chain_id,
+                ToBackgroundChain::SubscribeBitswap { sender },
+            ) => {
+                task.pending_new_bitswap_subscriptions.push(sender);
             }
             WakeUpReason::MessageForChain(
                 chain_id,
@@ -1273,6 +1696,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
                     debug_assert!(_was_in.is_some());
+
+                    if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                        peers.remove(&peer_id);
+                    }
 
                     debug_assert!(task.event_pending_send.is_none());
                     task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
@@ -1489,6 +1916,65 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::MessageForChain(
                 chain_id,
+                ToBackgroundChain::StartChildStorageProofRequest {
+                    target,
+                    config,
+                    timeout,
+                    result,
+                },
+            ) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "child-storage-proof-request-started",
+                    chain = task.network[chain_id].log_name,
+                    target,
+                    block_hash = HashDisplay(&config.block_hash)
+                );
+
+                match task.network.start_child_storage_proof_request(
+                    &target,
+                    chain_id,
+                    codec::ChildStorageProofRequestConfig {
+                        block_hash: config.block_hash,
+                        child_trie: &config.child_trie,
+                        keys: config.keys.iter().map(|k| k.as_slice()),
+                    },
+                    timeout,
+                ) {
+                    Ok(substream_id) => {
+                        task.child_storage_proof_requests
+                            .insert(substream_id, result);
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::NoConnection) => {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            "network",
+                            "child-storage-proof-request-error",
+                            chain = task.network[chain_id].log_name,
+                            target,
+                            error = "NoConnection"
+                        );
+                        let _ = result.send(Err(ChildStorageProofRequestError::NoConnection));
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::RequestTooLarge) => {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            "network",
+                            "child-storage-proof-request-error",
+                            chain = task.network[chain_id].log_name,
+                            target,
+                            error = "RequestTooLarge"
+                        );
+                        let _ = result.send(Err(ChildStorageProofRequestError::RequestTooLarge));
+                    }
+                };
+            }
+            WakeUpReason::MessageForChain(
+                chain_id,
                 ToBackgroundChain::SetLocalBestBlock {
                     best_hash,
                     best_number,
@@ -1579,6 +2065,114 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 ));
             }
             WakeUpReason::MessageForChain(
+                _chain_id,
+                ToBackgroundChain::SendBitswapMessage {
+                    target,
+                    message,
+                    result,
+                },
+            ) => {
+                let _ = result.send(task.network.bitswap_send_message(&target, message));
+            }
+            WakeUpReason::MessageForChain(
+                _chain_id,
+                ToBackgroundChain::BroadcastBitswapMessage { message, result },
+            ) => {
+                let peers = task
+                    .network
+                    .established_bitswap_desired()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let results = peers
+                    .iter()
+                    .map(|peer| {
+                        (
+                            peer,
+                            task.network.bitswap_send_message(peer, message.clone()),
+                        )
+                    })
+                    .collect::<Vec<_>>(); // we must collect first to send all messages
+
+                let succeeded_peers = results
+                    .iter()
+                    .filter_map(|(peer, r)| r.is_ok().then(|| (*peer).clone()))
+                    .collect::<Vec<_>>();
+
+                // TODO: introspecting a third-party error type below doesn't seem good.
+                let r = if !succeeded_peers.is_empty() {
+                    Ok(succeeded_peers)
+                } else if results
+                    .iter()
+                    .any(|(_peer, r)| matches!(r, Err(SendBitswapMessageError::QueueFull)))
+                {
+                    // `QueueFull` has higher priority than `NoConnection` for possible
+                    // back-pressure in higher level code.
+                    Err(SendBitswapMessageError::QueueFull)
+                } else {
+                    // This is only emitted if all peers fail with `NoConnection` or there is no
+                    // peers at all.
+                    Err(SendBitswapMessageError::NoConnection)
+                };
+
+                let _ = result.send(r);
+            }
+            WakeUpReason::MessageForChain(
+                chain_id,
+                ToBackgroundChain::BroadcastStatement { statement, result },
+            ) => {
+                let peers_to_send = task
+                    .network
+                    .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                let total = peers_to_send.len();
+                let mut sent = 0;
+                for peer in &peers_to_send {
+                    if task
+                        .network
+                        .gossip_send_statement(peer, chain_id, statement.clone())
+                        .is_ok()
+                    {
+                        sent += 1;
+                    }
+                }
+
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "statement-broadcast",
+                    chain = task.network[chain_id].log_name,
+                    sent,
+                    total,
+                );
+
+                let _ = result.send(BroadcastStatementResult { sent, total });
+            }
+            WakeUpReason::MessageForChain(
+                chain_id,
+                ToBackgroundChain::UpdateTopicAffinity { filter },
+            ) => {
+                task.current_affinity_filter
+                    .insert(chain_id, filter.clone());
+                if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                    let mut to_remove = Vec::new();
+                    for peer_id in peers.iter() {
+                        if let Err(
+                            SendTopicAffinityError::NoConnection
+                            | SendTopicAffinityError::ProtocolV1,
+                        ) = task.network.send_topic_affinity(peer_id, chain_id, &filter)
+                        {
+                            to_remove.push(peer_id.clone());
+                        }
+                    }
+                    for peer_id in &to_remove {
+                        peers.remove(peer_id);
+                    }
+                }
+            }
+            WakeUpReason::MessageForChain(
                 chain_id,
                 ToBackgroundChain::Discover {
                     list,
@@ -1587,7 +2181,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             ) => {
                 for (peer_id, addrs) in list {
                     if important_nodes {
-                        task.important_nodes.insert(peer_id.clone());
+                        task.important_nodes
+                            .entry(chain_id)
+                            .or_default()
+                            .insert(peer_id.clone());
                     }
 
                     // Note that we must call this function before `insert_address`, as documented
@@ -1647,40 +2244,44 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     ),
                 );
 
-                let random_peer_id = {
-                    let mut pub_key = [0; 32];
-                    rand_chacha::rand_core::RngCore::fill_bytes(&mut task.randomness, &mut pub_key);
-                    PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
-                };
+                // Iterative-style discovery: instead of a single FindNode against one peer,
+                // dispatch up to ALPHA=3 FindNode requests in parallel to distinct peers,
+                // each with a distinct random target. This gives substantially better DHT
+                // coverage per discovery round (more peers asked, more diverse keyspace
+                // walked) without requiring a per-query state machine.
+                //
+                // Order of preference for the target peer pool:
+                //  1. Peers we know speak this chain's Kad protocol (from Identify).
+                //  2. Peers with an open block-announces gossip substream (best-effort:
+                //     they're connected and likely speak Kad even if we haven't gotten
+                //     Identify yet).
+                const PARALLEL_FIND_NODE_PER_ROUND: usize = 3;
 
-                // TODO: select target closest to the random peer instead
-                let target = task
+                let mut targets: Vec<PeerId> = task
                     .network
-                    .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
-                    .next()
-                    .cloned();
+                    .kademlia_capable_peers(chain_id)
+                    .cloned()
+                    .collect();
+                if targets.len() < PARALLEL_FIND_NODE_PER_ROUND {
+                    for p in task
+                        .network
+                        .gossip_connected_peers(
+                            chain_id,
+                            service::GossipKind::ConsensusTransactions,
+                        )
+                        .cloned()
+                    {
+                        if !targets.contains(&p) {
+                            targets.push(p);
+                            if targets.len() >= PARALLEL_FIND_NODE_PER_ROUND {
+                                break;
+                            }
+                        }
+                    }
+                }
+                targets.truncate(PARALLEL_FIND_NODE_PER_ROUND);
 
-                if let Some(target) = target {
-                    match task.network.start_kademlia_find_node_request(
-                        &target,
-                        chain_id,
-                        &random_peer_id,
-                        Duration::from_secs(20),
-                    ) {
-                        Ok(_) => {}
-                        Err(service::StartRequestError::NoConnection) => unreachable!(),
-                    };
-
-                    log!(
-                        &task.platform,
-                        Debug,
-                        "network",
-                        "discovery-find-node-started",
-                        chain = &task.network[chain_id].log_name,
-                        request_target = target,
-                        requested_peer_id = random_peer_id
-                    );
-                } else {
+                if targets.is_empty() {
                     log!(
                         &task.platform,
                         Debug,
@@ -1688,6 +2289,37 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         "discovery-skipped-no-peer",
                         chain = &task.network[chain_id].log_name
                     );
+                } else {
+                    for target in &targets {
+                        let random_peer_id = {
+                            let mut pub_key = [0; 32];
+                            rand_chacha::rand_core::RngCore::fill_bytes(
+                                &mut task.randomness,
+                                &mut pub_key,
+                            );
+                            PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
+                        };
+
+                        match task.network.start_kademlia_find_node_request(
+                            target,
+                            chain_id,
+                            &random_peer_id,
+                            Duration::from_secs(20),
+                        ) {
+                            Ok(_) => {}
+                            Err(service::StartRequestError::NoConnection) => unreachable!(),
+                        };
+
+                        log!(
+                            &task.platform,
+                            Debug,
+                            "network",
+                            "discovery-find-node-started",
+                            chain = &task.network[chain_id].log_name,
+                            request_target = target,
+                            requested_peer_id = random_peer_id
+                        );
+                    }
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::HandshakeFinished {
@@ -1731,6 +2363,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         peer_id
                     );
                 }
+
+                task.bitswap_peering_strategy
+                    .increase_peer_connections(&peer_id);
             }
             WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
                 expected_peer_id: Some(_),
@@ -1772,7 +2407,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // another existing connection or connection attempt with that same peer. However,
                 // it is not possible to be sure that we will reach 0 connections or connection
                 // attempts, and thus we ban the peer every time.
-                let ban_duration = Duration::from_secs(5);
+                // Pre-handshake failures get a shorter ban: many parallel dials time out
+                // before any handshake completes, and a long slot-hold there dominates
+                // peer-discovery latency on restarts.
+                let ban_duration = if handshake_finished {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_secs(2)
+                };
                 task.network.gossip_remove_desired_all(
                     &peer_id,
                     service::GossipKind::ConsensusTransactions,
@@ -1793,9 +2435,34 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             chain = &task.network[chain_id].log_name,
                             peer_id,
                             ?ban_duration,
+                            // TODO: `reason` might be wrong, `handshake_finished` is not checked.
                             reason = "pre-handshake-disconnect"
                         );
                     }
+                }
+
+                if handshake_finished {
+                    task.network.bitswap_remove_desired(&peer_id);
+                    let what_happened = task
+                        .bitswap_peering_strategy
+                        .unassign_slot_and_ban(&peer_id, task.platform.now() + ban_duration);
+                    if matches!(
+                        what_happened,
+                        bitswap_peering_strategy::UnassignSlotAndBan::Banned { had_slot: true },
+                    ) {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            "network",
+                            "bitswap-slot-unassigned",
+                            peer_id,
+                            ?ban_duration,
+                            reason = "disconnect",
+                        );
+                    }
+                    let _ = task
+                        .bitswap_peering_strategy
+                        .decrease_peer_connections(&peer_id);
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
@@ -1892,6 +2559,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
                 debug_assert!(_prev_value.is_none());
 
+                task.chains_ever_gossip_connected.insert(chain_id);
+
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send = Some((
                     chain_id,
@@ -1918,7 +2587,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     ?error,
                 );
-                let ban_duration = Duration::from_secs(15);
+                // Must exceed polkadot-sdk's 5s notification-reject ban; otherwise we retry
+                // into a still-active remote ban. 0.5s margin covers network delay and
+                // clock skew between the two sides' ban timers.
+                let ban_duration = Duration::from_millis(5500);
 
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
@@ -2002,8 +2674,95 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     );
                 }
 
+                if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                    peers.remove(&peer_id);
+                }
+
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
+            }
+            WakeUpReason::NetworkEvent(service::Event::BitswapConnected { peer_id }) => {
+                task.bitswap_connected_peers = task.bitswap_connected_peers.saturating_add(1);
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-open-success",
+                    peer_id,
+                    total = task.bitswap_connected_peers
+                );
+            }
+            WakeUpReason::NetworkEvent(service::Event::BitswapOpenFailed { peer_id, error }) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-open-error",
+                    peer_id,
+                    ?error
+                );
+                let ban_duration = if error.is_protocol_not_available() {
+                    Duration::from_secs(600)
+                } else {
+                    Duration::from_secs(15)
+                };
+                if matches!(
+                    task.bitswap_peering_strategy
+                        .unassign_slot_and_ban(&peer_id, task.platform.now() + ban_duration,),
+                    bitswap_peering_strategy::UnassignSlotAndBan::Banned { had_slot: true }
+                ) {
+                    log!(
+                        &task.platform,
+                        Debug,
+                        "network",
+                        "bitswap-slot-unassigned",
+                        peer_id,
+                        ?ban_duration,
+                        reason = "bitswap-open-failed"
+                    );
+                    task.network.bitswap_remove_desired(&peer_id);
+                }
+            }
+            WakeUpReason::NetworkEvent(service::Event::BitswapMessage { peer_id, message }) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-message-received",
+                    peer_id
+                );
+                debug_assert!(task.bitswap_event_pending_send.is_none());
+                task.bitswap_event_pending_send =
+                    Some(BitswapEvent::BitswapMessage { peer_id, message });
+            }
+            WakeUpReason::NetworkEvent(service::Event::BitswapDisconnected { peer_id }) => {
+                debug_assert!(task.bitswap_connected_peers > 0);
+                task.bitswap_connected_peers = task.bitswap_connected_peers.saturating_sub(1);
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-closed",
+                    peer_id,
+                    total = task.bitswap_connected_peers
+                );
+                let ban_duration = Duration::from_secs(10);
+                if matches!(
+                    task.bitswap_peering_strategy
+                        .unassign_slot_and_ban(&peer_id, task.platform.now() + ban_duration,),
+                    bitswap_peering_strategy::UnassignSlotAndBan::Banned { had_slot: true }
+                ) {
+                    log!(
+                        &task.platform,
+                        Debug,
+                        "network",
+                        "bitswap-slot-unassigned",
+                        peer_id,
+                        ?ban_duration,
+                        reason = "bitswap-closed"
+                    );
+                    task.network.bitswap_remove_desired(&peer_id);
+                }
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -2146,11 +2905,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
 
-                let _ = task
-                    .storage_proof_requests
-                    .remove(&substream_id)
-                    .unwrap()
-                    .send(response.map_err(StorageProofRequestError::Request));
+                // Both regular storage proof and child storage proof use the same protocol,
+                // so check both HashMaps for the request.
+                if let Some(sender) = task.storage_proof_requests.remove(&substream_id) {
+                    let _ = sender.send(response.map_err(StorageProofRequestError::Request));
+                } else if let Some(sender) = task.child_storage_proof_requests.remove(&substream_id)
+                {
+                    let _ = sender.send(response.map_err(ChildStorageProofRequestError::Request));
+                } else {
+                    unreachable!()
+                }
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -2196,6 +2960,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 response: service::RequestResult::KademliaFindNode(Ok(nodes)),
                 ..
             }) => {
+                // Track whether this response taught us anything new. If so, we reset the
+                // chain's discovery backoff so that the next FindNode round runs at the
+                // initial 2s interval rather than continuing to back off — Kademlia is
+                // making progress, walk the DHT eagerly.
+                let mut any_new_peer = false;
                 for (peer_id, mut addrs) in nodes {
                     // Make sure to not insert too many address for a single peer.
                     // While the .
@@ -2206,7 +2975,20 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let mut valid_addrs = Vec::with_capacity(addrs.len());
                     for addr in addrs {
                         match Multiaddr::from_bytes(addr) {
-                            Ok(a) => {
+                            Ok(mut a) => {
+                                if !pop_p2p_if_matches(&mut a, &peer_id) {
+                                    log!(
+                                        &task.platform,
+                                        Debug,
+                                        "network",
+                                        "discovered-address-peer-id-mismatch",
+                                        chain = &task.network[chain_id].log_name,
+                                        announced_peer_id = peer_id,
+                                        addr = &a,
+                                        obtained_from = requestee_peer_id
+                                    );
+                                    continue;
+                                }
                                 if platform::address_parse::multiaddr_to_address(&a)
                                     .ok()
                                     .map_or(false, |addr| {
@@ -2254,6 +3036,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             peer_removed,
                         } = insert_outcome
                         {
+                            any_new_peer = true;
                             if let Some(peer_removed) = peer_removed {
                                 log!(
                                     &task.platform,
@@ -2287,6 +3070,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             basic_peering_strategy::InsertAddressResult::UnknownPeer
                         ));
                     }
+                }
+
+                if any_new_peer {
+                    task.network[chain_id].next_discovery_period = Duration::from_secs(2);
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
@@ -2470,6 +3257,65 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.event_pending_send =
                     Some((chain_id, Event::GrandpaCommitMessage { peer_id, message }));
             }
+            WakeUpReason::NetworkEvent(service::Event::StatementsNotification {
+                chain_id,
+                peer_id,
+                statements,
+            }) => {
+                debug_assert!(task.event_pending_send.is_none());
+
+                if statements.is_empty() {
+                    continue;
+                }
+
+                task.event_pending_send = Some((
+                    chain_id,
+                    Event::StatementsNotification {
+                        peer_id,
+                        statements,
+                    },
+                ));
+            }
+            WakeUpReason::NetworkEvent(service::Event::StatementProtocolConnected {
+                peer_id,
+                chain_id,
+                version,
+            }) => {
+                log!(
+                    &task.platform,
+                    Trace,
+                    "network",
+                    "statement-protocol-open-success",
+                    chain = &task.network[chain_id].log_name,
+                    peer_id,
+                    ?version,
+                );
+
+                if matches!(version, codec::StatementProtocolVersion::V2) {
+                    task.v2_statement_peers
+                        .entry(chain_id)
+                        .or_insert_with(|| {
+                            HashSet::with_capacity_and_hasher(16, Default::default())
+                        })
+                        .insert(peer_id.clone());
+                    if let Some(filter) = task.current_affinity_filter.get(&chain_id) {
+                        if let Err(
+                            SendTopicAffinityError::NoConnection
+                            | SendTopicAffinityError::ProtocolV1,
+                        ) = task.network.send_topic_affinity(&peer_id, chain_id, filter)
+                        {
+                            task.v2_statement_peers
+                                .get_mut(&chain_id)
+                                .unwrap()
+                                .remove(&peer_id);
+                        }
+                    }
+                }
+            }
+            // TODO: we don't filter outbound statements yet
+            WakeUpReason::NetworkEvent(service::Event::StatementTopicAffinityReceived {
+                ..
+            }) => {}
             WakeUpReason::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
                 // TODO: handle properly?
                 log!(
@@ -2500,6 +3346,19 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     service::GossipKind::ConsensusTransactions,
                 );
+            }
+            WakeUpReason::CanAssignBitswapSlot(peer_id) => {
+                task.bitswap_peering_strategy.assign_slot(&peer_id).unwrap();
+
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-slot-assigned",
+                    peer_id
+                );
+
+                task.network.bitswap_insert_desired(peer_id);
             }
             WakeUpReason::NextRecentConnectionRestore => {
                 task.num_recent_connection_opening =
@@ -2714,6 +3573,17 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                 );
             }
+            WakeUpReason::CanOpenBitswap(peer_id) => {
+                task.network.bitswap_open(&peer_id).unwrap();
+
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-open-start",
+                    peer_id
+                );
+            }
             WakeUpReason::MessageToConnection {
                 connection_id,
                 message,
@@ -2729,5 +3599,69 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 debug_assert!(_send_result.is_ok());
             }
         }
+    }
+}
+
+/// Pops a trailing `/p2p/<peer_id>` from `addr` if it matches `expected_peer`. Returns `false`
+/// (caller must discard the address) on mismatch.
+fn pop_p2p_if_matches(
+    addr: &mut smoldot::libp2p::multiaddr::Multiaddr,
+    expected_peer: &smoldot::libp2p::peer_id::PeerId,
+) -> bool {
+    use smoldot::libp2p::multiaddr::Protocol;
+    match addr.iter().last() {
+        Some(Protocol::P2p(mh)) => {
+            if mh.into_bytes() == expected_peer.as_bytes() {
+                addr.pop();
+                true
+            } else {
+                false
+            }
+        }
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pop_p2p_if_matches;
+    use smoldot::libp2p::{multiaddr::Multiaddr, peer_id::PeerId};
+
+    // Two distinct, valid PeerIds. The first is reused from existing smoldot tests in
+    // `lib/src/libp2p/multiaddr.rs:629`; the second is the bootnode peer-id observed in the
+    // test environment that motivated this change.
+    const PEER_A: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    const PEER_B: &str = "12D3KooWQk1yQtG1YugyKjiQf6KNk8VjGGAT5xy1FWcnRKN4yXYJ";
+
+    fn peer(s: &str) -> PeerId {
+        PeerId::from_bytes(bs58::decode(s).into_vec().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn no_suffix_passes_through_unchanged() {
+        let mut addr: Multiaddr = "/ip4/127.0.0.1/tcp/30333/ws".parse().unwrap();
+        let before = addr.clone();
+        assert!(pop_p2p_if_matches(&mut addr, &peer(PEER_A)));
+        assert_eq!(addr, before);
+    }
+
+    #[test]
+    fn matching_suffix_is_stripped() {
+        let mut addr: Multiaddr = format!("/ip4/127.0.0.1/tcp/30333/ws/p2p/{PEER_A}")
+            .parse()
+            .unwrap();
+        assert!(pop_p2p_if_matches(&mut addr, &peer(PEER_A)));
+        let expected: Multiaddr = "/ip4/127.0.0.1/tcp/30333/ws".parse().unwrap();
+        assert_eq!(addr, expected);
+    }
+
+    #[test]
+    fn mismatched_suffix_rejects_and_keeps_addr() {
+        let original: Multiaddr = format!("/ip4/127.0.0.1/tcp/30333/ws/p2p/{PEER_A}")
+            .parse()
+            .unwrap();
+        let mut addr = original.clone();
+        assert!(!pop_p2p_if_matches(&mut addr, &peer(PEER_B)));
+        assert_eq!(addr, original);
     }
 }

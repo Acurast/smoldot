@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    log, network_service,
+    bitswap_service, log, network_service,
     platform::PlatformRef,
     runtime_service, sync_service, transactions_service,
     util::{self, SipHasherBuild},
@@ -67,6 +67,9 @@ pub(super) struct Config<TPlat: PlatformRef> {
     /// Service that provides a ready-to-be-called runtime for the current best block.
     pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
 
+    /// Service that fulfills IPFS CID requests.
+    pub bitswap_service: Arc<bitswap_service::BitswapService>,
+
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
     /// Type of chain, as found in the chain specification.
@@ -86,6 +89,13 @@ pub(super) struct Config<TPlat: PlatformRef> {
 
     /// Hash of the genesis block of the chain.
     pub genesis_block_hash: [u8; 32],
+
+    /// Statement protocol configuration. `None` if the statement protocol is disabled.
+    pub statement_protocol_config: Option<network_service::StatementProtocolConfig>,
+
+    /// Maximum number of seen statement hashes tracked per subscription for dedup.
+    /// `None` if the statement protocol is disabled.
+    pub max_seen_statements: Option<NonZero<usize>>,
 }
 
 /// Fields used to process JSON-RPC requests in the background.
@@ -116,6 +126,8 @@ struct Background<TPlat: PlatformRef> {
     /// Randomness used for various purposes, such as generating subscription IDs.
     randomness: ChaCha20Rng,
 
+    statement_protocol_config: Option<network_service::StatementProtocolConfig>,
+
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     /// See [`Config::sync_service`].
@@ -124,6 +136,8 @@ struct Background<TPlat: PlatformRef> {
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     /// See [`Config::transactions_service`].
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
+    /// See [`Config::bitswap_service`].
+    bitswap_service: Arc<bitswap_service::BitswapService>,
 
     /// Tasks that are spawned by the service and running in the background.
     background_tasks: stream::FuturesUnordered<Pin<Box<dyn Future<Output = Event<TPlat>> + Send>>>,
@@ -164,6 +178,12 @@ struct Background<TPlat: PlatformRef> {
     /// to  `transaction_v1_broadcast`, transactions are left forever until the API user
     /// unsubscribes.
     transactions_subscriptions: hashbrown::HashMap<String, TransactionWatch, fnv::FnvBuildHasher>,
+
+    /// Active `bitswap_unstable_stream` subscriptions, keyed by subscription ID. Holds the
+    /// [`bitswap_service::BitswapStreamHandle`] alive — dropping the entry (via
+    /// `bitswap_unstable_unstream` or task shutdown) drops the embedded cancel guard, which sends a
+    /// Bitswap Cancel wantlist to peers we contacted on this subscription's behalf.
+    bitswap_subscriptions: hashbrown::HashMap<String, BitswapSubscription, fnv::FnvBuildHasher>,
 
     /// List of all active `state_subscribeStorage` subscriptions, indexed by the subscription ID.
     /// Values are the list of keys requested by this subscription.
@@ -219,6 +239,47 @@ struct Background<TPlat: PlatformRef> {
     /// The values are list of keys.
     state_get_keys_paged_cache:
         lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>,
+
+    /// Maximum number of seen statement hashes tracked per subscription for dedup.
+    /// `None` if the statement protocol is disabled.
+    max_seen_statements: Option<NonZero<usize>>,
+
+    /// Active statement subscriptions. Maps subscription ID to subscription state.
+    statement_subscriptions:
+        hashbrown::HashMap<String, super::statement::StatementSubscription, fnv::FnvBuildHasher>,
+
+    statement_affinity_stale: bool,
+    next_statement_affinity_update: Option<Pin<Box<TPlat::Delay>>>,
+    last_statement_affinity_update: Option<TPlat::Instant>,
+
+    /// Receiver for network events (statements from peers).
+    network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
+}
+
+impl<TPlat: PlatformRef> Background<TPlat> {
+    /// Marks the statement affinity as stale and schedules the next update.
+    /// If no update was ever sent, or the last update was more than the configured
+    /// affinity update interval ago, the update fires immediately.
+    /// Otherwise, it fires after the remaining interval.
+    fn schedule_statement_affinity_update(&mut self) {
+        if self.statement_affinity_stale {
+            return;
+        }
+        self.statement_affinity_stale = true;
+        let interval = self
+            .statement_protocol_config
+            .as_ref()
+            .expect("affinity updates require statement protocol; qed")
+            .affinity_update_interval();
+        let delay = match &self.last_statement_affinity_update {
+            Some(last) => {
+                let elapsed = self.platform.now() - last.clone();
+                interval.saturating_sub(elapsed)
+            }
+            None => Duration::ZERO,
+        };
+        self.next_statement_affinity_update = Some(Box::pin(self.platform.sleep(delay)));
+    }
 }
 
 /// State of the subscription towards the runtime service.
@@ -458,6 +519,32 @@ enum Event<TPlat: PlatformRef> {
         block_hash: [u8; 32],
         result: Result<Vec<sync_service::StorageResultItem>, sync_service::StorageQueryError>,
     },
+    BitswapGetResult {
+        request_id_json: String,
+        result: Result<Vec<u8>, bitswap_service::BitswapGetError>,
+    },
+    /// Result of [`bitswap_service::BitswapService::bitswap_stream`] (the Have-broadcast handshake).
+    /// Resolving this off the main dispatch loop keeps `bitswap_unstable_stream` non-blocking.
+    BitswapStreamReady {
+        request_id_json: String,
+        result: Result<bitswap_service::BitswapStreamHandle, bitswap_service::BitswapGetError>,
+    },
+    /// One iteration of the `bitswap_unstable_stream` events pump. `event` is `None` if the
+    /// events channel closed (no more notifications). The receiver is shipped along so the main
+    /// loop can re-arm the next pump iteration.
+    BitswapStreamEvent {
+        subscription_id: String,
+        event: Option<(String, bitswap_service::BlockResult)>,
+        events_rx: async_channel::Receiver<(String, bitswap_service::BlockResult)>,
+    },
+}
+
+struct BitswapSubscription {
+    /// Holding the handle keeps the underlying batch alive on the bitswap service. When this
+    /// struct is dropped (explicit unsubscribe or whole-task shutdown), the inner
+    /// cancel guard inside [`bitswap_service::BitswapStreamHandle`] drops too, sending
+    /// `CancelBatch`.
+    _handle: bitswap_service::BitswapStreamHandle,
 }
 
 struct TransactionWatch {
@@ -507,11 +594,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
             config.platform.fill_random_bytes(&mut seed);
             seed
         }),
+        statement_protocol_config: config.statement_protocol_config,
         next_garbage_collection: Box::pin(config.platform.sleep(Duration::new(0, 0))),
         network_service: config.network_service.clone(),
         sync_service: config.sync_service.clone(),
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
+        bitswap_service: config.bitswap_service.clone(),
         background_tasks: stream::FuturesUnordered::new(),
         runtime_service_subscription: RuntimeServiceSubscription::NotCreated,
         all_heads_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
@@ -534,6 +623,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             2,
             Default::default(),
         ),
+        bitswap_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()),
         chain_head_follow_subscriptions: hashbrown::HashMap::with_hasher(Default::default()),
         legacy_api_storage_subscriptions: BTreeSet::new(),
         legacy_api_storage_subscriptions_by_key: BTreeSet::new(),
@@ -567,6 +657,15 @@ pub(super) async fn run<TPlat: PlatformRef>(
         ),
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: false,
+        max_seen_statements: config.max_seen_statements,
+        statement_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+            16,
+            Default::default(),
+        ),
+        statement_affinity_stale: false,
+        next_statement_affinity_update: None,
+        last_statement_affinity_update: None,
+        network_events_rx: None,
         platform: config.platform,
     };
 
@@ -600,6 +699,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
             StartStorageSubscriptionsUpdates,
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
+            NetworkStatementsReceived(Vec<([u8; 32], codec::Statement)>),
+            MustSubscribeNetworkEvents,
+            StatementAffinityUpdate,
         }
 
         // Wait until there is something to do.
@@ -691,6 +793,32 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.next_garbage_collection = Box::pin(me.platform.sleep(Duration::from_secs(10)));
                 WakeUpReason::GarbageCollection
             })
+            .or(async {
+                if let Some(delay) = &mut me.next_statement_affinity_update {
+                    delay.await;
+                } else {
+                    future::pending().await
+                }
+                me.next_statement_affinity_update = None;
+                WakeUpReason::StatementAffinityUpdate
+            })
+            .or(async {
+                let Some(rx) = &me.network_events_rx else {
+                    return WakeUpReason::MustSubscribeNetworkEvents;
+                };
+                loop {
+                    let Ok(event) = rx.recv().await else {
+                        me.network_events_rx = None;
+                        return WakeUpReason::MustSubscribeNetworkEvents;
+                    };
+                    match event {
+                        network_service::Event::StatementsNotification { statements, .. } => {
+                            return WakeUpReason::NetworkStatementsReceived(statements);
+                        }
+                        _ => {}
+                    }
+                }
+            })
             .await
         };
 
@@ -709,10 +837,74 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.finalized_heads_subscriptions.shrink_to_fit();
                 me.runtime_version_subscriptions.shrink_to_fit();
                 me.transactions_subscriptions.shrink_to_fit();
+                me.statement_subscriptions.shrink_to_fit();
                 me.legacy_api_stale_storage_subscriptions.shrink_to_fit();
                 me.multistage_requests_to_advance.shrink_to_fit();
                 me.block_headers_pending.shrink_to_fit();
                 me.block_runtimes_pending.shrink_to_fit();
+            }
+
+            WakeUpReason::StatementAffinityUpdate => {
+                me.statement_affinity_stale = false;
+                me.last_statement_affinity_update = Some(me.platform.now());
+
+                let combined_filter = super::statement::build_combined_affinity_filter(
+                    &me.statement_subscriptions,
+                    me.statement_protocol_config
+                        .as_ref()
+                        .expect("statement affinity requires statement protocol; qed"),
+                );
+                me.network_service
+                    .update_topic_affinity(combined_filter)
+                    .await;
+            }
+
+            WakeUpReason::MustSubscribeNetworkEvents => {
+                debug_assert!(me.network_events_rx.is_none());
+                me.network_events_rx = Some(me.network_service.subscribe().await);
+            }
+
+            WakeUpReason::NetworkStatementsReceived(statements) => {
+                if me.statement_subscriptions.is_empty() {
+                    continue;
+                }
+
+                // TODO: O(n_statements * n_subscriptions * n_topics_in_filter * n_topics_in_statement) complexity.
+                // Create a reverse index `topic` -> `subscription` for adequate complexity.
+                for (sub_id, sub) in me.statement_subscriptions.iter_mut() {
+                    let matching: Vec<methods::HexString> = statements
+                        .iter()
+                        .filter_map(|(hash, s)| {
+                            if !sub.accept(hash, s) {
+                                return None;
+                            }
+                            Some(methods::HexString(codec::encode_statement(s).expect(
+                                "re-encoding a decoded statement always succeeds; qed",
+                            )))
+                        })
+                        .collect();
+
+                    if matching.is_empty() {
+                        continue;
+                    }
+
+                    let notification = methods::ServerToClient::statement_statement {
+                        subscription: Cow::Borrowed(sub_id),
+                        result: methods::StatementEvent::NewStatements {
+                            statements: matching,
+                            remaining: None,
+                        },
+                    }
+                    .to_json_request_object_parameters(None);
+                    if me.responses_tx.send(notification).await.is_err() {
+                        log!(
+                            &me.platform,
+                            Debug,
+                            &me.log_target,
+                            "Failed to send statement notification: response channel closed"
+                        );
+                    }
+                }
             }
 
             WakeUpReason::IncomingJsonRpcRequest(request_json) => {
@@ -802,7 +994,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::system_peers { .. }
                     | methods::MethodCall::system_properties { .. }
                     | methods::MethodCall::system_removeReservedPeer { .. }
-                    | methods::MethodCall::system_version { .. } => {
+                    | methods::MethodCall::system_version { .. }
+                    | methods::MethodCall::statement_submit { .. }
+                    | methods::MethodCall::statement_subscribeStatement { .. }
+                    | methods::MethodCall::statement_unsubscribeStatement { .. } => {
                         if !me.printed_legacy_json_rpc_warning {
                             me.printed_legacy_json_rpc_warning = true;
                             log!(
@@ -845,7 +1040,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::transactionWatch_v1_unwatch { .. }
                     | methods::MethodCall::sudo_network_unstable_watch { .. }
                     | methods::MethodCall::sudo_network_unstable_unwatch { .. }
-                    | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
+                    | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
+                    | methods::MethodCall::bitswap_unstable_get { .. }
+                    | methods::MethodCall::bitswap_unstable_stream { .. }
+                    | methods::MethodCall::bitswap_unstable_unstream { .. } => {}
                 }
 
                 // Actual requests handler.
@@ -970,6 +1168,71 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         // We don't cancel the task in `background_tasks` that will
                         // generate events about this transaction. Instead, the task will stop
                         // renewing itself the next time it generates a notification.
+                    }
+
+                    methods::MethodCall::bitswap_unstable_get { cid } => {
+                        log!(
+                            &me.platform,
+                            Debug,
+                            &me.log_target,
+                            // TODO: only log `cid` if it validates, do not log raw RPC input.
+                            format!("Request for Bitswap CID {cid}")
+                        );
+
+                        me.background_tasks.push({
+                            let bitswap_service = me.bitswap_service.clone();
+                            let request_id_json = request_id_json.to_owned();
+
+                            Box::pin(async move {
+                                let result = bitswap_service.bitswap_get(cid).await;
+
+                                Event::BitswapGetResult {
+                                    request_id_json,
+                                    result,
+                                }
+                            })
+                        });
+                    }
+
+                    methods::MethodCall::bitswap_unstable_stream { cids } => {
+                        log!(
+                            &me.platform,
+                            Debug,
+                            &me.log_target,
+                            format!("Bitswap stream subscription: {} cids", cids.len())
+                        );
+
+                        me.background_tasks.push({
+                            let bitswap_service = me.bitswap_service.clone();
+                            let request_id_json = request_id_json.to_owned();
+                            Box::pin(async move {
+                                let result = bitswap_service.bitswap_stream(cids).await;
+                                Event::BitswapStreamReady {
+                                    request_id_json,
+                                    result,
+                                }
+                            })
+                        });
+                    }
+
+                    methods::MethodCall::bitswap_unstable_unstream { subscription } => {
+                        // Removing the entry drops the embedded `BitswapStreamHandle`, which
+                        // drops the cancel guard, which sends `ToBackground::CancelBatch` to the
+                        // bitswap service. The service then evicts pending slots and emits a
+                        // Bitswap Cancel wantlist to peers we'd contacted. Once the entry is
+                        // gone, the `contains_key` gate in the `BitswapStreamEvent` drain
+                        // ensures neither per-CID events nor `streamDone` are emitted on the
+                        // cancelled subscription.
+                        me.bitswap_subscriptions.remove(&*subscription);
+                        // Per spec: success even if the subscription is unknown or already
+                        // completed.
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::bitswap_unstable_unstream(())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
 
                     methods::MethodCall::chain_getBlock { hash } => {
@@ -1960,7 +2223,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .responses_tx
                                 .send(parse::build_error_response(
                                     request_id_json,
-                                    parse::ErrorResponse::InvalidParams,
+                                    parse::ErrorResponse::InvalidParams(None),
                                     None,
                                 ))
                                 .await;
@@ -2127,26 +2390,29 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             }
                         };
 
-                        if child_trie.is_some() {
-                            // TODO: implement this
+                        // Child-trie queries only support value and hash reads. The descendants
+                        // and merkle-value variants resolve against a trie root that, for a child
+                        // trie, isn't known until its proof arrives.
+                        if child_trie.is_some()
+                            && items.iter().any(|item| {
+                                !matches!(
+                                    item.ty,
+                                    methods::ChainHeadStorageType::Value
+                                        | methods::ChainHeadStorageType::Hash
+                                )
+                            })
+                        {
                             let _ = me
                                 .responses_tx
                                 .send(parse::build_error_response(
                                     request_id_json,
                                     parse::ErrorResponse::ServerError(
                                         -32000,
-                                        "Child key storage queries not supported yet",
+                                        "child-trie storage queries only support value and hash reads",
                                     ),
                                     None,
                                 ))
                                 .await;
-                            log!(
-                                &me.platform,
-                                Warn,
-                                &me.log_target,
-                                "chainHead_v1_storage has been called with a non-null childTrie. \
-                                This isn't supported by smoldot yet."
-                            );
                             continue;
                         }
 
@@ -2198,15 +2464,28 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         }
 
                         // Initialize the storage query operation.
-                        let fetch_operation = me.sync_service.clone().storage_query(
-                            block_number,
-                            hash.0,
-                            block_state_trie_root,
-                            storage_operations.into_iter(),
-                            3,
-                            Duration::from_secs(20),
-                            NonZero::<u32>::new(2).unwrap(),
-                        );
+                        let fetch_operation = if let Some(child_trie) = child_trie {
+                            me.sync_service.clone().child_storage_query(
+                                block_number,
+                                hash.0,
+                                block_state_trie_root,
+                                child_trie.0,
+                                storage_operations.into_iter(),
+                                3,
+                                Duration::from_secs(20),
+                                NonZero::<u32>::new(2).unwrap(),
+                            )
+                        } else {
+                            me.sync_service.clone().storage_query(
+                                block_number,
+                                hash.0,
+                                block_state_trie_root,
+                                storage_operations.into_iter(),
+                                3,
+                                Duration::from_secs(20),
+                                NonZero::<u32>::new(2).unwrap(),
+                            )
+                        };
 
                         let operation_id = {
                             let mut operation_id = [0u8; 32];
@@ -2494,7 +2773,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         .responses_tx
                                         .send(parse::build_error_response(
                                             request_id_json,
-                                            parse::ErrorResponse::InvalidParams,
+                                            parse::ErrorResponse::InvalidParams(None),
                                             None,
                                         ))
                                         .await;
@@ -2622,7 +2901,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                             .responses_tx
                                             .send(parse::build_error_response(
                                                 request_id_json,
-                                                parse::ErrorResponse::InvalidParams,
+                                                parse::ErrorResponse::InvalidParams(None),
                                                 Some(
                                                     &serde_json::to_string(
                                                         "multiaddr doesn't end with /p2p",
@@ -2639,7 +2918,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .responses_tx
                                     .send(parse::build_error_response(
                                         request_id_json,
-                                        parse::ErrorResponse::InvalidParams,
+                                        parse::ErrorResponse::InvalidParams(None),
                                         Some(
                                             &serde_json::to_string(
                                                 "multiaddr doesn't end with /p2p",
@@ -2654,7 +2933,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .responses_tx
                                     .send(parse::build_error_response(
                                         request_id_json,
-                                        parse::ErrorResponse::InvalidParams,
+                                        parse::ErrorResponse::InvalidParams(None),
                                         Some(
                                             &serde_json::to_string(&err.to_string())
                                                 .unwrap_or_else(|_| unreachable!()),
@@ -2773,7 +3052,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .responses_tx
                                 .send(parse::build_error_response(
                                     request_id_json,
-                                    json_rpc::parse::ErrorResponse::InvalidParams,
+                                    json_rpc::parse::ErrorResponse::InvalidParams(None),
                                     None,
                                 ))
                                 .await;
@@ -2794,6 +3073,67 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::Response::transactionWatch_v1_unwatch(())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::statement_submit { encoded } => {
+                        let network = me.network_service.clone();
+                        let result = super::statement::validate_and_broadcast_statement(
+                            &encoded.0,
+                            |bytes| async move { network.broadcast_statement(bytes).await },
+                        )
+                        .await;
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::statement_submit(result)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::statement_subscribeStatement { filter } => {
+                        let subscription_id: String = {
+                            let mut id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut id);
+                            hex::encode(id)
+                        };
+
+                        me.statement_subscriptions.insert(
+                            subscription_id.clone(),
+                            super::statement::StatementSubscription::new(
+                                filter,
+                                me.max_seen_statements,
+                            ),
+                        );
+
+                        me.schedule_statement_affinity_update();
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::statement_subscribeStatement(Cow::Owned(
+                                    subscription_id,
+                                ))
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::statement_unsubscribeStatement { subscription } => {
+                        let existed = me.statement_subscriptions.remove(&subscription).is_some();
+
+                        if existed {
+                            me.schedule_statement_affinity_update();
+                        }
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::statement_unsubscribeStatement(existed)
                                     .to_json_response(request_id_json),
                             )
                             .await;
@@ -4342,18 +4682,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }) => {
                 // A `chainHead_call` operation has finished.
 
+                // The JSON-RPC client might have unfollowed the subscription or stopped
+                // the operation while this event was queued. In that case, drop the event.
                 let Some(subscription_info) =
                     me.chain_head_follow_subscriptions.get_mut(&subscription_id)
                 else {
-                    unreachable!()
+                    continue;
                 };
                 let Some(operation_info) = subscription_info
                     .operations_in_progress
                     .remove(&operation_id)
                 else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
+                    continue;
                 };
 
                 subscription_info.available_operation_slots += operation_info.occupied_slots;
@@ -4421,18 +4761,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }) => {
                 // A `chainHead_body` operation has finished.
 
+                // The JSON-RPC client might have unfollowed the subscription or stopped
+                // the operation while this event was queued. In that case, drop the event.
                 let Some(subscription_info) =
                     me.chain_head_follow_subscriptions.get_mut(&subscription_id)
                 else {
-                    unreachable!()
+                    continue;
                 };
                 let Some(operation_info) = subscription_info
                     .operations_in_progress
                     .remove(&operation_id)
                 else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
+                    continue;
                 };
 
                 subscription_info.available_operation_slots += operation_info.occupied_slots;
@@ -4584,16 +4924,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                 // TODO: generate a waitingForContinue here and wait for user to continue
 
-                // Re-queue the operation for the follow-up items.
-                let on_interrupt = me
-                    .chain_head_follow_subscriptions
-                    .get(&subscription_id)
-                    .unwrap_or_else(|| unreachable!())
-                    .operations_in_progress
-                    .get(&operation_id)
-                    .unwrap_or_else(|| unreachable!())
-                    .interrupt
-                    .listen();
+                // Re-queue the operation for the follow-up items. The JSON-RPC client
+                // might have unfollowed the subscription or stopped the operation while
+                // this event was queued. In that case, drop the event.
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.get(&subscription_id)
+                else {
+                    continue;
+                };
+                let Some(operation_info) =
+                    subscription_info.operations_in_progress.get(&operation_id)
+                else {
+                    continue;
+                };
+                let on_interrupt = operation_info.interrupt.listen();
                 me.background_tasks.push(Box::pin(async move {
                     async {
                         on_interrupt.await;
@@ -4619,18 +4963,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }) => {
                 // A `chainHead_storage` operation has finished successfully.
 
+                // The JSON-RPC client might have unfollowed the subscription or stopped
+                // the operation while this event was queued. In that case, drop the event.
                 let Some(subscription_info) =
                     me.chain_head_follow_subscriptions.get_mut(&subscription_id)
                 else {
-                    unreachable!()
+                    continue;
                 };
                 let Some(operation_info) = subscription_info
                     .operations_in_progress
                     .remove(&operation_id)
                 else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
+                    continue;
                 };
 
                 subscription_info.available_operation_slots += operation_info.occupied_slots;
@@ -4656,18 +5000,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }) => {
                 // A `chainHead_storage` operation has finished failed.
 
+                // The JSON-RPC client might have unfollowed the subscription or stopped
+                // the operation while this event was queued. In that case, drop the event.
                 let Some(subscription_info) =
                     me.chain_head_follow_subscriptions.get_mut(&subscription_id)
                 else {
-                    unreachable!()
+                    continue;
                 };
                 let Some(operation_info) = subscription_info
                     .operations_in_progress
                     .remove(&operation_id)
                 else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
+                    continue;
                 };
 
                 subscription_info.available_operation_slots += operation_info.occupied_slots;
@@ -5855,6 +6199,130 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 debug_assert!(me.legacy_api_storage_query_in_progress);
                 me.legacy_api_storage_query_in_progress = false;
                 // TODO: add a delay or something?
+            }
+
+            WakeUpReason::Event(Event::BitswapGetResult {
+                request_id_json,
+                result,
+            }) => {
+                let response = match result {
+                    Ok(block) => methods::Response::bitswap_unstable_get(methods::HexString(block))
+                        .to_json_response(&request_id_json),
+                    Err(error) => error.to_json_rpc_error(&request_id_json),
+                };
+                let _ = me.responses_tx.send(response).await;
+            }
+
+            WakeUpReason::Event(Event::BitswapStreamReady {
+                request_id_json,
+                result,
+            }) => {
+                match result {
+                    Ok(handle) => {
+                        let subscription_id = {
+                            let mut sub_id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut sub_id);
+                            bs58::encode(sub_id).into_string()
+                        };
+
+                        let events_rx = handle.events_rx.clone();
+                        let _prev = me.bitswap_subscriptions.insert(
+                            subscription_id.clone(),
+                            BitswapSubscription { _handle: handle },
+                        );
+                        debug_assert!(_prev.is_none());
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::bitswap_unstable_stream(Cow::Borrowed(
+                                    &subscription_id,
+                                ))
+                                .to_json_response(&request_id_json),
+                            )
+                            .await;
+
+                        // Push the events pump. The pump yields one event per loop and re-arms
+                        // itself; on channel close it ends the chain by delivering `event = None`.
+                        me.background_tasks.push(Box::pin(async move {
+                            let event = events_rx.recv().await.ok();
+                            Event::BitswapStreamEvent {
+                                subscription_id,
+                                event,
+                                events_rx,
+                            }
+                        }));
+                    }
+                    Err(error) => {
+                        let _ = me
+                            .responses_tx
+                            .send(error.to_json_rpc_error(&request_id_json))
+                            .await;
+                    }
+                }
+            }
+
+            WakeUpReason::Event(Event::BitswapStreamEvent {
+                subscription_id,
+                event,
+                events_rx,
+            }) => {
+                // If the JSON-RPC client unsubscribed (or this is a stale event), the
+                // subscription will not be in the map and we must not emit notifications for it.
+                // Per spec, cancellation via `unstream` is silent (no `streamDone`).
+                if !me.bitswap_subscriptions.contains_key(&subscription_id) {
+                    continue;
+                }
+
+                match event {
+                    Some((cid, br)) => {
+                        let result = match br {
+                            bitswap_service::BlockResult::Ok(bytes) => {
+                                methods::BitswapStreamEvent::StreamItem {
+                                    cid: Cow::Owned(cid),
+                                    value: methods::HexString(bytes),
+                                }
+                            }
+                            bitswap_service::BlockResult::Err(err) => {
+                                let (code, message) = err.to_block_result_err();
+                                methods::BitswapStreamEvent::StreamItemError {
+                                    cid: Cow::Owned(cid),
+                                    code,
+                                    message: Cow::Owned(message),
+                                }
+                            }
+                        };
+                        let notification = methods::ServerToClient::bitswap_unstable_streamEvent {
+                            subscription: Cow::Borrowed(&subscription_id),
+                            result,
+                        }
+                        .to_json_request_object_parameters(None);
+
+                        let _ = me.responses_tx.send(notification).await;
+
+                        // Re-arm the pump for the next event.
+                        me.background_tasks.push(Box::pin(async move {
+                            let next = events_rx.recv().await.ok();
+                            Event::BitswapStreamEvent {
+                                subscription_id,
+                                event: next,
+                                events_rx,
+                            }
+                        }));
+                    }
+                    None => {
+                        // Channel closed — the bitswap service has emitted exactly one event per
+                        // input CID and dropped its sender. Emit the spec-required `streamDone`
+                        // marker before tearing down the subscription entry.
+                        let notification = methods::ServerToClient::bitswap_unstable_streamEvent {
+                            subscription: Cow::Borrowed(&subscription_id),
+                            result: methods::BitswapStreamEvent::StreamDone,
+                        }
+                        .to_json_request_object_parameters(None);
+                        let _ = me.responses_tx.send(notification).await;
+                        me.bitswap_subscriptions.remove(&subscription_id);
+                    }
+                }
             }
 
             WakeUpReason::NotifyFinalizedHeads => {
