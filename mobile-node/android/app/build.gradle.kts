@@ -8,7 +8,7 @@ plugins {
 object Library {
     const val groupId = "com.github.smoldot"
     const val artifactId = "smoldot-android"
-    const val version = "2.0.39-beta04"
+    const val version = "3.2.0-beta01"
 }
 
 android {
