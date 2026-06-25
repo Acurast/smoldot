@@ -13,8 +13,8 @@ object Library {
 
 android {
     namespace = Library.groupId
-    compileSdk = 36
-    ndkVersion = "27.2.12479018"
+    compileSdk = 37
+    ndkVersion = "29.0.14206865"
     defaultConfig {
         minSdk = 26
         version = Library.version
@@ -44,7 +44,10 @@ android {
     kotlin {
         jvmToolchain(17)
         compilerOptions {
-            freeCompilerArgs.add("-Xcontext-parameters")
+            freeCompilerArgs.addAll(
+                "-Xcontext-parameters",
+                "-Xexplicit-backing-fields",
+            )
         }
     }
     externalNativeBuild {
@@ -57,6 +60,9 @@ android {
         getByName("androidTest") {
             assets.srcDir("../../../demo-chain-specs")
         }
+    }
+    publishing {
+        singleVariant("release") {}
     }
 }
 
@@ -74,7 +80,7 @@ cargo {
 
 publishing {
     publications {
-        register<MavenPublication>("release") {
+        register<MavenPublication>("maven") {
             groupId = Library.groupId
             artifactId = Library.artifactId
             version = Library.version
@@ -100,7 +106,7 @@ dependencies {
     androidTestImplementation(libs.kotlinx.coroutines.test)
 }
 
-val buildSmoldotFFI: TaskProvider<Task> = tasks.register("buildSmoldotFFI", Task::class.java) {
+val buildSmoldotFFI: TaskProvider<Task> = tasks.register("ffiBuild", Task::class.java) {
     dependsOn("cargoBuild")
 
     doLast {

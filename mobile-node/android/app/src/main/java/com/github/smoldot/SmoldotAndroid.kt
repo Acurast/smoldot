@@ -11,7 +11,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -115,11 +114,8 @@ internal class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
             $$"Chain$$$id-json-rpc-responses"
         )
         private var jsonRpcResponsesNonEmpty: CompletableDeferred<Unit>? = null
-        private val _jsonRpcResponses: MutableSharedFlow<String> =
-            MutableSharedFlow(extraBufferCapacity = JSON_RPC_RESPONSES_BUFFER_CAPACITY)
-
         override val jsonRpcResponses: Flow<String>
-            get() = _jsonRpcResponses.asSharedFlow()
+            field: MutableSharedFlow<String> = MutableSharedFlow(extraBufferCapacity = JSON_RPC_RESPONSES_BUFFER_CAPACITY)
 
         private val closed: AtomicBoolean = AtomicBoolean(false)
 
@@ -131,7 +127,7 @@ internal class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
                     val response = jniJsonRpcResponsesPeek(id.toUInt().toLong())
 
                     if (response != null) {
-                        _jsonRpcResponses.emit(response.toString(charset = Charsets.UTF_8))
+                        jsonRpcResponses.emit(response.toString(charset = Charsets.UTF_8))
                     }
 
                     if (response == null) {
