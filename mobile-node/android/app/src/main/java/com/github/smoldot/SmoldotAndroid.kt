@@ -63,7 +63,7 @@ internal class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
 
         val chain = if (chainResult.isSuccess) Chain(chainId.toInt()) else run {
             jniRemoveChain(chainId)
-            throw chainResult.exceptionOrNull() ?: RuntimeException("Chain failed to initialize due to an unknown error.")
+            throw chainResult.exceptionOrNull() ?: SmoldotInitializationException("Chain failed to initialize due to an unknown error.")
         }
 
         chain.also {
@@ -77,7 +77,7 @@ internal class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
         coroutineScope.launch {
             val chainId = chainId.toInt()
             chainResults.waitUntilSubscribed(chainId)
-            chainResults.emit(chainId, error?.let { Result.failure(RuntimeException(it)) } ?: Result.success(Unit))
+            chainResults.emit(chainId, error?.let { Result.failure(SmoldotInitializationException(it)) } ?: Result.success(Unit))
         }
     }
 
@@ -142,8 +142,8 @@ internal class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
         override suspend fun sendJsonRpc(request: String) = withContext(Dispatchers.IO) {
             when (val result = jniSendJsonRpc(request.toByteArray(charset = Charsets.UTF_8), id.toUInt().toLong())) {
                 0L -> return@withContext
-                1L -> throw RuntimeException("JSON-RPC requests queue is full")
-                else -> throw RuntimeException("Internal error: unknown json_rpc_send error code: $result")
+                1L -> throw SmoldotRpcException("JSON-RPC requests queue is full")
+                else -> throw SmoldotRpcException("Internal error: unknown json_rpc_send error code: $result")
             }
         }
 
