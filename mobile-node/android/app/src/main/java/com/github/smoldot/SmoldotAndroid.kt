@@ -1,0 +1,194 @@
+package com.github.smoldot
+
+import com.github.smoldot.internal.utils.MutableSharedMapFlow
+import kotlinx.coroutines.CloseableCoroutineDispatcher
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.newSingleThreadContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.min
+
+internal class SmoldotAndroid(logLevel: Smoldot.LogLevel) : Smoldot {
+    private val coroutineScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    private val chainResults: MutableSharedMapFlow<Int, Result<Unit>> = MutableSharedMapFlow()
+
+    private val chainsMutex: Mutex = Mutex()
+    private val chains: MutableMap<Int, Chain> = mutableMapOf()
+
+    init {
+        if (!jniInit(UUID.randomUUID().hashCode(), logLevel.value.toLong())) {
+            throw IllegalStateException("Only one instance of SmoldotAndroid can be active at the time.")
+        }
+    }
+
+    override suspend fun addChain(
+        chainSpec: String,
+        databaseContent: String?,
+        potentialRelayChains: List<Smoldot.Chain>,
+        disableJsonRpc: Boolean,
+        jsonRpcMaxPendingRequests: UInt,
+        jsonRpcMaxSubscriptions: UInt,
+    ): Smoldot.Chain = withContext(Dispatchers.IO) {
+        val chainId = jniAddChain(
+            chainSpec.toByteArray(charset = Charsets.UTF_8),
+            (databaseContent ?: "").toByteArray(charset = Charsets.UTF_8),
+            potentialRelayChains.map {
+                ByteBuffer.allocate(4).apply {
+                    order(ByteOrder.LITTLE_ENDIAN)
+                    putInt(it.id)
+                }.array()
+            }.fold(byteArrayOf(), ByteArray::plus),
+            if (disableJsonRpc) 0 else min(jsonRpcMaxPendingRequests.toLong(), 0xffffffff),
+            min(jsonRpcMaxSubscriptions.toLong(), 0xffffffff),
+        )
+
+        val chainResult = chainResults[chainId.toInt()].first()
+
+        val chain = if (chainResult.isSuccess) Chain(chainId.toInt()) else run {
+            jniRemoveChain(chainId)
+            throw chainResult.exceptionOrNull() ?: SmoldotInitializationException("Chain failed to initialize due to an unknown error.")
+        }
+
+        chain.also {
+            chainsMutex.withLock {
+                chains[it.id] = it
+            }
+        }
+    }
+
+    public fun onChainInitialized(chainId: Long, error: String?) {
+        coroutineScope.launch {
+            val chainId = chainId.toInt()
+            chainResults.waitUntilSubscribed(chainId)
+            chainResults.emit(chainId, error?.let { Result.failure(SmoldotInitializationException(it)) } ?: Result.success(Unit))
+        }
+    }
+
+    public fun notifyChain(chainId: Long) {
+        coroutineScope.launch {
+            chainsMutex.withLock { chains[chainId.toInt()]?.onNonEmptyJsonRpcResponses() }
+        }
+    }
+
+    override suspend fun removeChain(chain: Smoldot.Chain) {
+         withContext(Dispatchers.IO) {
+            chain.close()
+            chainsMutex.withLock {
+                chains.remove(chain.id)
+            }
+        }
+    }
+
+    override suspend fun destroy() {
+        chainsMutex.withLock {
+            with(chains) {
+                values.forEach { it.close() }
+                clear()
+            }
+        }
+        coroutineScope.cancel()
+
+        jniDestroy()
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class, DelicateCoroutinesApi::class)
+    public inner class Chain(override val id: Int) : Smoldot.Chain {
+        private val jsonRpcResponsesContext: CloseableCoroutineDispatcher = newSingleThreadContext(
+            $$"Chain$$$id-json-rpc-responses"
+        )
+        private var jsonRpcResponsesNonEmpty: CompletableDeferred<Unit>? = null
+        override val jsonRpcResponses: Flow<String>
+            field: MutableSharedFlow<String> = MutableSharedFlow(extraBufferCapacity = JSON_RPC_RESPONSES_BUFFER_CAPACITY)
+
+        private val closed: AtomicBoolean = AtomicBoolean(false)
+
+        private val jsonRpcResponsesScope: CoroutineScope = CoroutineScope(jsonRpcResponsesContext)
+
+        init {
+            jsonRpcResponsesScope.launch {
+                while (isActive) {
+                    val response = jniJsonRpcResponsesPeek(id.toUInt().toLong())
+
+                    if (response != null) {
+                        jsonRpcResponses.emit(response.toString(charset = Charsets.UTF_8))
+                    }
+
+                    if (response == null) {
+                        jsonRpcResponsesNonEmpty = CompletableDeferred()
+                        jsonRpcResponsesNonEmpty?.await()
+                        jsonRpcResponsesNonEmpty = null
+                    }
+                }
+            }
+        }
+
+        override suspend fun sendJsonRpc(request: String) = withContext(Dispatchers.IO) {
+            when (val result = jniSendJsonRpc(request.toByteArray(charset = Charsets.UTF_8), id.toUInt().toLong())) {
+                0L -> return@withContext
+                1L -> throw SmoldotRpcException("JSON-RPC requests queue is full")
+                else -> throw SmoldotRpcException("Internal error: unknown json_rpc_send error code: $result")
+            }
+        }
+
+        internal fun onNonEmptyJsonRpcResponses() {
+            jsonRpcResponsesScope.launch {
+                jsonRpcResponsesNonEmpty?.complete(Unit)
+            }
+        }
+
+        override suspend fun close() {
+            if (!closed.compareAndSet(false, true)) return
+
+            jsonRpcResponsesScope.cancel()
+            // Remove the chain on the single-threaded dispatcher so it can never run concurrently
+            // with an in-flight jniJsonRpcResponsesPeek, whose returned pointer would otherwise be
+            // invalidated mid-read.
+            withContext(jsonRpcResponsesContext) {
+                jniRemoveChain(id.toUInt().toLong())
+            }
+            jsonRpcResponsesContext.close()
+        }
+
+    }
+
+    private external fun jniInit(id: Int, logLevel: Long): Boolean
+
+    private external fun jniAddChain(
+        chainSpec: ByteArray,
+        databaseContent: ByteArray,
+        potentialRelayChains: ByteArray,
+        jsonRpcMaxPendingRequests: Long,
+        jsonRpcMaxSubscriptions: Long,
+    ): Long
+    private external fun jniRemoveChain(chainId: Long)
+
+    private external fun jniSendJsonRpc(request: ByteArray, chainId: Long): Long
+    private external fun jniJsonRpcResponsesPeek(chainId: Long): ByteArray?
+    private external fun jniDestroy()
+
+    private companion object {
+        private const val JSON_RPC_RESPONSES_BUFFER_CAPACITY: Int = 64
+    }
+}
+
+public fun Smoldot.Companion.initAndroid(logLevel: Smoldot.LogLevel = Smoldot.LogLevel.Info) {
+    System.loadLibrary("smoldot")
+    useInstance { SmoldotAndroid(logLevel) }
+}
