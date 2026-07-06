@@ -80,6 +80,33 @@ class SmoldotAndroidTest {
         withTimeout(INIT_TIMEOUT) { smoldot.removeChain(chain) }
     }
 
+    @Test
+    fun throwsOnPanicAndRecoversAfterReset() = runBlocking {
+        val smoldot = Smoldot.instance()
+        val chain = withTimeout(INIT_TIMEOUT) {
+            smoldot.addChain(readAsset(CHAIN_SPEC))
+        }
+
+        // Sending a request to a removed chain violates the client's API contract and makes it
+        // panic - a convenient way to exercise the panic recovery path without any test hooks.
+        withTimeout(INIT_TIMEOUT) { smoldot.removeChain(chain) }
+        val panic = runCatching { chain.sendJsonRpc(CHAIN_NAME_REQUEST) }.exceptionOrNull()
+        assertTrue("expected SmoldotPanicException, got: $panic", panic is SmoldotPanicException)
+
+        // The client keeps failing fast until it is reset.
+        val subsequent = runCatching { chain.sendJsonRpc(CHAIN_NAME_REQUEST) }.exceptionOrNull()
+        assertTrue("expected SmoldotPanicException, got: $subsequent", subsequent is SmoldotPanicException)
+
+        // A full reset restores a working client.
+        Smoldot.reset()
+        val recovered = withTimeout(INIT_TIMEOUT) {
+            Smoldot.instance().addChain(readAsset(CHAIN_SPEC))
+        }
+        val response = jsonRpcRoundTrip(recovered, CHAIN_NAME_REQUEST)
+
+        assertTrue(JSONObject(response).has("result"))
+    }
+
     private suspend fun jsonRpcRoundTrip(chain: Smoldot.Chain, request: String): String =
         withTimeout(RESPONSE_TIMEOUT) {
             coroutineScope {
@@ -100,6 +127,9 @@ class SmoldotAndroidTest {
 
     private companion object {
         const val CHAIN_SPEC = "westend2.json"
+
+        const val CHAIN_NAME_REQUEST = """{"jsonrpc":"2.0","id":1,"method":"chainSpec_v1_chainName"}"""
+
         val INIT_TIMEOUT = 60.seconds
         val RESPONSE_TIMEOUT = 30.seconds
     }

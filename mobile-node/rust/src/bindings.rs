@@ -31,11 +31,29 @@
 //!
 //! This avoids potential stack overflows and tricky borrowing-related situations.
 
+use core::sync::atomic::Ordering;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::slice;
 
+/// Runs `f`, converting a panic - past or present - into `fallback`.
+///
+/// Returns `fallback` right away if a panic has already poisoned the client, and catches any panic
+/// unwinding out of `f` so that it never crosses the FFI boundary (which would be undefined
+/// behavior). Panics themselves are reported separately, via the [`panic`] host function.
+fn catch<R>(fallback: R, f: impl FnOnce() -> R) -> R {
+    if crate::platform::POISONED.load(Ordering::SeqCst) {
+        return fallback;
+    }
+
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or(fallback)
+}
+
 unsafe extern "C" {
-    /// Must stop the execution immediately. The message is a UTF-8 string found
+    /// Reports a panic in the Rust code. The message is a UTF-8 string found
     /// in the memory at offset `message_ptr` and with length `message_len`.
+    ///
+    /// After this function returns, the panic unwinds without crossing into the host. The client
+    /// must be considered unusable until [`reset`] is called.
     pub unsafe fn panic(message_ptr: *const u8, message_len: usize);
 
     /// Called in response to [`add_chain`] once the initialization of the chain is complete.
@@ -78,7 +96,19 @@ unsafe extern "C" {
 /// inferior or equal to the value of `max_log_level` passed here.
 #[unsafe(no_mangle)]
 pub extern "C" fn init(max_log_level: u32) {
-    crate::init(max_log_level);
+    catch((), || crate::init(max_log_level));
+}
+
+/// Drops the client together with all its chains and services, and clears the panicked state. The
+/// next call to any other function re-creates the client from scratch.
+///
+/// Call this after [`panic`] has reported a panic in order to restore the client to a working
+/// state, or as part of a general teardown.
+#[unsafe(no_mangle)]
+pub extern "C" fn reset() {
+    // Deliberately not gated behind the poisoned check: resetting is the only way out of the
+    // poisoned state.
+    let _ = catch_unwind(super::reset_client);
 }
 
 /// Adds a chain to the client. The client will try to stay connected and synchronize this chain.
@@ -105,6 +135,8 @@ pub extern "C" fn init(max_log_level: u32) {
 /// called by smoldot.
 /// It is possible to call [`remove_chain`] while the initialization is still in progress in
 /// order to cancel it.
+///
+/// Returns [`u32::MAX`] if the client has panicked and must be reset via [`reset`].
 #[unsafe(no_mangle)]
 pub extern "C" fn add_chain(
     chain_spec_buffer_ptr: *const u8,
@@ -116,13 +148,15 @@ pub extern "C" fn add_chain(
     potential_relay_chains_buffer_ptr: *const u8,
     potential_relay_chains_buffer_len: usize,
 ) -> u32 {
-    super::add_chain(
-        get_buffer(chain_spec_buffer_ptr, chain_spec_buffer_len),
-        get_buffer(database_content_buffer_ptr, database_content_buffer_len),
-        json_rpc_max_pending_requests,
-        json_rpc_max_subscriptions,
-        get_buffer(potential_relay_chains_buffer_ptr, potential_relay_chains_buffer_len),
-    )
+    catch(u32::MAX, || {
+        super::add_chain(
+            get_buffer(chain_spec_buffer_ptr, chain_spec_buffer_len),
+            get_buffer(database_content_buffer_ptr, database_content_buffer_len),
+            json_rpc_max_pending_requests,
+            json_rpc_max_subscriptions,
+            get_buffer(potential_relay_chains_buffer_ptr, potential_relay_chains_buffer_len),
+        )
+    })
 }
 
 /// Removes a chain previously added using [`add_chain`]. Instantly unsubscribes all the JSON-RPC
@@ -131,7 +165,7 @@ pub extern "C" fn add_chain(
 /// Can be called on a chain which hasn't finished initializing yet.
 #[unsafe(no_mangle)]
 pub extern "C" fn remove_chain(chain_id: u32) {
-    super::remove_chain(chain_id);
+    catch((), || super::remove_chain(chain_id));
 }
 
 /// Emit a JSON-RPC request or notification towards the given chain previously added using
@@ -153,10 +187,11 @@ pub extern "C" fn remove_chain(chain_id: u32) {
 /// This function returns:
 /// - 0 on success.
 /// - 1 if the chain has too many pending JSON-RPC requests and refuses to queue another one.
+/// - 2 if the client has panicked and must be reset via [`reset`].
 ///
 #[unsafe(no_mangle)]
 pub extern "C" fn json_rpc_send(text_buffer_ptr: *const u8, text_buffer_len: usize, chain_id: u32) -> u32 {
-    super::json_rpc_send(get_buffer(text_buffer_ptr, text_buffer_len), chain_id)
+    catch(2, || super::json_rpc_send(get_buffer(text_buffer_ptr, text_buffer_len), chain_id))
 }
 
 /// Obtains information about the first response in the queue of JSON-RPC responses.
@@ -175,7 +210,16 @@ pub extern "C" fn json_rpc_send(text_buffer_ptr: *const u8, text_buffer_len: usi
 /// from the queue. You can then call [`json_rpc_responses_peek`] again to read the next response.
 #[unsafe(no_mangle)]
 pub extern "C" fn json_rpc_responses_peek(chain_id: u32) -> *const JsonRpcResponseInfo {
-    super::json_rpc_responses_peek(chain_id)
+    // An empty response info, indistinguishable from an empty queue, is returned when the client
+    // has panicked; the host learns about the panic through the [`panic`] function instead.
+    static EMPTY_RESPONSE_INFO: JsonRpcResponseInfo = JsonRpcResponseInfo {
+        ptr: core::ptr::null(),
+        len: 0,
+    };
+
+    catch(&EMPTY_RESPONSE_INFO as *const JsonRpcResponseInfo, || {
+        super::json_rpc_responses_peek(chain_id)
+    })
 }
 
 /// See [`json_rpc_responses_peek`].
@@ -188,6 +232,7 @@ pub struct JsonRpcResponseInfo {
 }
 
 unsafe impl Send for JsonRpcResponseInfo {}
+unsafe impl Sync for JsonRpcResponseInfo {}
 
 /// Removes the first response from the queue of JSON-RPC responses. This is the response whose
 /// information can be retrieved using [`json_rpc_responses_peek`].
@@ -199,7 +244,7 @@ unsafe impl Send for JsonRpcResponseInfo {}
 /// chain that was created with `json_rpc_running` equal to 0.
 #[unsafe(no_mangle)]
 pub extern "C" fn json_rpc_responses_pop(chain_id: u32) {
-    super::json_rpc_responses_pop(chain_id);
+    catch((), || super::json_rpc_responses_pop(chain_id));
 }
 
 pub(crate) fn get_buffer(ptr: *const u8, len: usize) -> Vec<u8> {

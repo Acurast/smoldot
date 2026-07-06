@@ -10,6 +10,7 @@
 
 #include <memory>
 #include <mutex>
+#include <string>
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,6 +25,9 @@ namespace Smoldot {
 
         mutable std::mutex event_observer_mutex_;
         std::shared_ptr<Event::Observer> event_observer_ = nullptr;
+
+        mutable std::mutex last_panic_message_mutex_;
+        std::string last_panic_message_;
 
     public:
         State() = default;
@@ -40,6 +44,9 @@ namespace Smoldot {
         void SetEventObserver(std::shared_ptr<Event::Observer> observer);
         void RemoveEventObserver();
         void OnEvent(Event::Instance* type);
+
+        // Returns the message of the last panic event, or an empty string if no panic occurred.
+        std::string GetLastPanicMessage() const;
     };
 }
 

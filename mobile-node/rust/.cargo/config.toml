@@ -1,0 +1,11 @@
+# Applies to builds invoked from this directory only (i.e. the mobile node), leaving the rest of
+# the workspace on the default profiles.
+#
+# Mobile builds must unwind on panic so that panics can be caught at task and FFI boundaries and
+# reported to the host, instead of killing the host process.
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"

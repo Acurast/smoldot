@@ -1,7 +1,11 @@
 use alloc::sync::Arc;
 use std::panic;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::bindings;
+
+/// Set as soon as any panic occurs. While set, all FFI entry points fail fast, until the client
+/// is reset via [`crate::bindings::reset`].
+pub(crate) static POISONED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn platform_ref() -> &'static Arc<smoldot_light::platform::DefaultPlatform> {
     static PLATFORM_REF: async_lock::OnceCell<Arc<smoldot_light::platform::DefaultPlatform>> = async_lock::OnceCell::new();
@@ -14,7 +18,9 @@ pub(crate) fn platform_ref() -> &'static Arc<smoldot_light::platform::DefaultPla
     })
 }
 
-pub(crate) fn panic_handler(info: &panic::PanicInfo) {
+pub(crate) fn panic_handler(info: &panic::PanicHookInfo) {
+    POISONED.store(true, Ordering::SeqCst);
+
     let message = alloc::string::ToString::to_string(info);
 
     unsafe {
@@ -22,8 +28,10 @@ pub(crate) fn panic_handler(info: &panic::PanicInfo) {
             message.as_bytes().as_ptr(),
             message.as_bytes().len(),
         );
-        unreachable!();
     }
+
+    // Returning from the hook lets the panic unwind; unwinding is caught at task and FFI
+    // boundaries, so it never crosses into the host.
 }
 
 

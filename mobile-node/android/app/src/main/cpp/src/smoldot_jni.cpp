@@ -160,6 +160,19 @@ namespace JNI {
     }
 }
 
+namespace {
+    void ThrowSmoldotPanicException(JNIEnv *env) {
+        jclass clazz = env->FindClass("com/github/smoldot/SmoldotPanicException");
+        if (clazz == nullptr) {
+            return; // a ClassNotFoundError is already pending
+        }
+
+        auto message = Smoldot::State::Get()->GetLastPanicMessage();
+        env->ThrowNew(clazz, message.empty() ? "Smoldot has panicked." : message.c_str());
+        env->DeleteLocalRef(clazz);
+    }
+}
+
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *jvm, void *reserved) {
     JNIEnv *env;
     __android_log_write(ANDROID_LOG_INFO, "SmoldotAndroid", "Loaded");
@@ -208,14 +221,20 @@ Java_com_github_smoldot_SmoldotAndroid_jniAddChain(JNIEnv *env, jobject thiz, jb
     auto database_content_vec = GetUInt8Vector(env, database_content);
     auto potential_relay_chains_vec = GetUInt8Vector(env, potential_relay_chains);
 
-    return add_chain(chain_spec_vec.data(),
-                     chain_spec_vec.size(),
-                     database_content_vec.data(),
-                     database_content_vec.size(),
-                     static_cast<uint32_t>(json_rpc_max_pending_requests),
-                     static_cast<uint32_t>(json_rpc_max_subscriptions),
-                     potential_relay_chains_vec.data(),
-                     potential_relay_chains_vec.size());
+    auto chain_id = add_chain(chain_spec_vec.data(),
+                              chain_spec_vec.size(),
+                              database_content_vec.data(),
+                              database_content_vec.size(),
+                              static_cast<uint32_t>(json_rpc_max_pending_requests),
+                              static_cast<uint32_t>(json_rpc_max_subscriptions),
+                              potential_relay_chains_vec.data(),
+                              potential_relay_chains_vec.size());
+
+    if (chain_id == UINT32_MAX) {
+        ThrowSmoldotPanicException(env);
+    }
+
+    return chain_id;
 }
 
 extern "C"
@@ -231,7 +250,12 @@ Java_com_github_smoldot_SmoldotAndroid_jniSendJsonRpc(JNIEnv *env, jobject thiz,
 
     auto request_vec = GetUInt8Vector(env, request);
 
-    return json_rpc_send(request_vec.data(), request_vec.size(), chain_id);
+    auto result = json_rpc_send(request_vec.data(), request_vec.size(), chain_id);
+    if (result == 2) {
+        ThrowSmoldotPanicException(env);
+    }
+
+    return result;
 }
 
 extern "C"
@@ -265,6 +289,7 @@ Java_com_github_smoldot_SmoldotAndroid_jniJsonRpcResponsesPeek(JNIEnv *env, jobj
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_github_smoldot_SmoldotAndroid_jniDestroy(JNIEnv *env, jobject thiz) {
+    reset();
     Smoldot::State::Reset();
     {
         std::lock_guard<std::mutex> lock(JNI::mutex);

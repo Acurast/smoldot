@@ -41,6 +41,20 @@ namespace Smoldot {
     }
 
     void State::OnEvent(Event::Instance *event) {
+        switch (event->GetType()) {
+            case Event::Type::kPanic: {
+                auto panic_event = dynamic_cast<Event::Panic*>(event);
+                if (panic_event != nullptr) {
+                    std::lock_guard<std::mutex> lock(last_panic_message_mutex_);
+                    last_panic_message_ = panic_event->GetMessage();
+                }
+
+                break;
+            }
+            default:
+                break;
+        }
+
         // Take a strong reference to the observer under the lock, then release the lock before
         // dispatching. This keeps the observer alive for the duration of the (potentially
         // re-entrant) JNI up-call without holding `event_observer_mutex_` across it.
@@ -57,5 +71,11 @@ namespace Smoldot {
 
         observer->OnEvent(event);
         delete event;
+    }
+
+    std::string State::GetLastPanicMessage() const {
+        std::lock_guard<std::mutex> lock(last_panic_message_mutex_);
+
+        return last_panic_message_;
     }
 }

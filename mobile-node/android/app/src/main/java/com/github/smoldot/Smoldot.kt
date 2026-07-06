@@ -21,6 +21,11 @@ public interface Smoldot {
 
     public interface Chain {
         public val id: Int
+
+        /**
+         * JSON-RPC responses and notifications emitted by the chain. Collecting fails with
+         * [SmoldotPanicException] if the client panics.
+         */
         public val jsonRpcResponses: Flow<String>
 
         public suspend fun sendJsonRpc(request: String)

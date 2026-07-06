@@ -19,6 +19,7 @@ extern "C" {
 /******** Rust -> C++ ********/
 
 void init(uint32_t max_log_level);
+void reset();
 
 uint32_t add_chain(
         uint8_t *chain_spec_buffer_ptr,
