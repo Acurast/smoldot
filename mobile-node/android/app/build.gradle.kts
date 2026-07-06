@@ -106,7 +106,7 @@ dependencies {
     androidTestImplementation(libs.kotlinx.coroutines.test)
 }
 
-val buildSmoldotFFI: TaskProvider<Task> = tasks.register("ffiBuild", Task::class.java) {
+val buildFFI: TaskProvider<Task> = tasks.register("buildFFI", Task::class.java) {
     dependsOn("cargoBuild")
 
     doLast {
