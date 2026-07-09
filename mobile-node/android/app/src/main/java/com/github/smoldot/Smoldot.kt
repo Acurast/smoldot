@@ -1,9 +1,10 @@
 package com.github.smoldot
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
-import kotlin.concurrent.atomics.updateAndFetch
 
 @OptIn(ExperimentalAtomicApi::class)
 public interface Smoldot {
@@ -41,19 +42,23 @@ public interface Smoldot {
     }
 
     public companion object {
-        private var INSTANCE: AtomicReference<Smoldot?> = AtomicReference(null)
+        private val mutex: Mutex = Mutex()
+        private var INSTANCE: Smoldot? = null
         private var factory: AtomicReference<(() -> Smoldot)?> = AtomicReference(null)
 
         internal fun useInstance(factory: () -> Smoldot) {
             this.factory.store(factory)
         }
 
-        public fun instance(): Smoldot =
-            INSTANCE.updateAndFetch { it ?: factory.load()?.invoke() }
-                ?: throw IllegalStateException("Smoldot not initialized. Call platform init method first.")
+        public suspend fun instance(): Smoldot = mutex.withLock {
+            INSTANCE ?: (
+                factory.load()?.invoke() ?: throw IllegalStateException("Smoldot not initialized. Call platform init method first.")
+            ).also { INSTANCE = it }
+        }
 
-        public suspend fun reset() {
-            INSTANCE.exchange(null)?.destroy()
+        public suspend fun reset(): Unit = mutex.withLock {
+            INSTANCE?.destroy()
+            INSTANCE = null
         }
     }
 }
